@@ -5,20 +5,29 @@ use native_db::{native_db, Database, ToKey};
 use native_model::{native_model, Model};
 use serde::{Deserialize, Serialize};
 
-pub mod native_db {
-    pub use native_db::*;
-}
-pub mod native_model {
-    pub use native_model::*;
-}
-pub mod bebop {
-    pub use bebop::*;
+pub mod external {
+    pub use native_db;
+    pub use native_model;
+    pub use tokio_tungstenite;
 }
 
-pub use generated::schema::*;
-pub use helpers::client_sender::{ClientSenders, ClientSendersTrait};
-pub use helpers::common::{get_setting_by_key, set_setting};
-pub use helpers::server_sender::{SenderStatus, ServerSender, ServerSenderTrait};
+pub mod schema {
+    pub use crate::generated::schema::*;
+}
+
+pub mod client_sender {
+    pub use crate::helpers::client_sender::*;
+}
+
+pub mod server_sender {
+    pub use crate::helpers::server_sender::*;
+}
+
+pub mod common {
+    pub use crate::helpers::common::{get_setting_by_key, set_setting};
+}
+
+use server_sender::{ServerSender, ServerSenderTrait};
 use tokio::sync::RwLock;
 
 mod generated;

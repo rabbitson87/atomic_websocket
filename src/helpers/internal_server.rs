@@ -14,7 +14,7 @@ use crate::{
         common::{make_disconnect_message, make_pong_message},
         traits::StringUtil,
     },
-    Category, Data, Ping,
+    schema::{Category, Data, Ping},
 };
 use bebop::Record;
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};

@@ -7,8 +7,10 @@ use std::{
 };
 
 use atomic_websocket::{
-    native_db::{Builder, Database, Models},
-    AtomicWebsocket, SenderStatus, Settings, WindowAppConnectInfo,
+    external::native_db::{Builder, Database, Models},
+    schema::WindowAppConnectInfo,
+    server_sender::SenderStatus,
+    AtomicWebsocket, Settings,
 };
 use tokio::{
     sync::{watch::Receiver, RwLock},

@@ -23,6 +23,7 @@ use crate::helpers::traits::date_time::now;
 
 #[derive(Clone, Debug)]
 pub enum SenderStatus {
+    Start,
     Connected,
     Disconnected,
 }
@@ -39,7 +40,7 @@ pub struct ServerSender {
 
 impl ServerSender {
     pub fn new(db: Arc<RwLock<Database<'static>>>, server_ip: String) -> Self {
-        let (status_sx, _) = watch::channel(SenderStatus::Disconnected);
+        let (status_sx, _) = watch::channel(SenderStatus::Start);
         let (handle_message_sx, _) = watch::channel(vec![0_u8]);
         Self {
             sx: None,

@@ -6,8 +6,8 @@ use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    generated::schema::{Category, Data, Ping},
-    Disconnect, Expired, Settings,
+    schema::{Category, Data, Disconnect, Expired, Ping},
+    Settings,
 };
 
 #[macro_export]
