@@ -1,10 +1,9 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use native_db::Database;
 use tokio::{
     self,
     net::{TcpListener, TcpStream},
-    sync::{watch, Mutex, RwLock},
+    sync::{watch, RwLock},
 };
 use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
 

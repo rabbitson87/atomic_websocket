@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use helpers::{
-    internal_client::AtomicClient,
-    internal_server::AtomicServer,
-    server_sender::{ServerSender, ServerSenderTrait},
-};
+use helpers::{internal_client::AtomicClient, internal_server::AtomicServer};
 use native_db::{native_db, Database, ToKey};
 use native_model::{native_model, Model};
 use serde::{Deserialize, Serialize};
@@ -20,8 +16,9 @@ pub mod bebop {
 }
 
 pub use generated::schema::*;
+pub use helpers::client_sender::{ClientSenders, ClientSendersTrait};
 pub use helpers::common::{get_setting_by_key, set_setting};
-pub use helpers::server_sender::SenderStatus;
+pub use helpers::server_sender::{SenderStatus, ServerSender, ServerSenderTrait};
 use tokio::sync::RwLock;
 
 mod generated;
