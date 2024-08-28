@@ -1,0 +1,68 @@
+
+struct Data {
+    uint16 category;
+    byte[] datas;
+}
+
+enum Category {
+    Ping = 10000;
+    Pong = 10001;
+    Expired = 10002;
+    Disconnect = 10003;
+    AppStartup = 10004;
+    AppStartupOutput = 10005;
+    SaveData = 10006;
+    WindowAppConnectInfo = 10007;
+    ValidClient = 10008;
+    ClientId = 10009;
+}
+
+struct Ping {
+    string peer;
+    int32 activations;
+}
+
+struct Pong {
+    int32 totalActivations;
+}
+
+struct Expired {
+    bool isExpired;
+}
+
+struct Disconnect {
+    string peer;
+}
+
+
+struct AppStartup {
+    string ID;
+    uint8 appType;
+}
+
+struct AppStartupOutput {
+    bool success;
+}
+
+struct SaveData {
+    uint16 saveKey;
+    byte[] datas;
+}
+
+enum SaveKey {
+    WindowAppConnectInfo = 1;
+    ValidClient = 2;
+    ClientId = 3;
+}
+
+struct WindowAppConnectInfo {
+    string currentIp;
+    string broadcastIp;
+    string gatewayIp;
+    string serverIp;
+    string port;
+}
+
+struct ValidClient {
+    bool isValid;
+}

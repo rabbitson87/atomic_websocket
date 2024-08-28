@@ -1,0 +1,35 @@
+[package]
+name = "atomic_websocket"
+version = "0.1.0"
+authors = ["hsng95@gmail.com"]
+description = "High level Websocket util library from tokio-tungstenite"
+homepage = "https://github.com/rabbitson87/atomic_websocket"
+repository = "https://github.com/rabbitson87/atomic_websocket"
+keywords = ["websocket", "client", "server"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.77"
+
+[dependencies]
+tokio = { version = "1.39.3", default-features = false, features = [
+    "sync",
+    "macros",
+    "time",
+    "rt-multi-thread",
+] }
+async-trait = "0.1.81"
+native_db = "0.7.1"
+native_model = "0.4.19"
+tokio-tungstenite = "0.23.1"
+bebop = "3.0.14"
+chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
+serde = { version = "1.0.208", features = ["derive"] }
+futures-util = "0.3.30"
+nanoid = "0.4.0"
+
+[workspace]
+members = ["make_bebop", "test"]
+
+[features]
+default = []
+debug = []

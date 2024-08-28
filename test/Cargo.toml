@@ -1,0 +1,19 @@
+[package]
+name = "test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.39.3", features = [
+    "rt-multi-thread",
+    "sync",
+    "macros",
+    "fs",
+] }
+atomic_websocket = { path = "../", features = ["debug"] }
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
