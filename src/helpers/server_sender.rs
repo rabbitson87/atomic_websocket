@@ -21,7 +21,7 @@ use crate::{
 
 use crate::helpers::traits::date_time::now;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SenderStatus {
     Start,
     Connected,

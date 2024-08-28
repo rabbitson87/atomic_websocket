@@ -85,6 +85,9 @@ pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
     loop {
         let status = receiver.borrow_and_update().clone();
         println!("Status: {:?}", status);
+        if status == SenderStatus::Disconnected {
+            println!("Disconnected");
+        }
         if receiver.changed().await.is_err() {
             break;
         }

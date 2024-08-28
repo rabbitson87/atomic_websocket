@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.6
+
+* add partialEqual for SenderStatus.
+
 ## 0.1.5
 
 * add get_connect for client.
