@@ -20,6 +20,7 @@ pub mod client_sender {
 }
 
 pub mod server_sender {
+    pub use crate::helpers::internal_client::get_connect;
     pub use crate::helpers::server_sender::*;
 }
 

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.5
+
+* add get_connect for client.
+
 ## 0.1.4
 
 * add get_server_ip for ServerSender.
