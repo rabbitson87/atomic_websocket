@@ -25,6 +25,7 @@ pub mod server_sender {
 
 pub mod common {
     pub use crate::helpers::common::{get_setting_by_key, set_setting};
+    pub use crate::helpers::get_websocket::get_id;
 }
 
 use server_sender::{ServerSender, ServerSenderTrait};
