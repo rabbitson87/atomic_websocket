@@ -6,8 +6,12 @@ use native_model::{native_model, Model};
 use serde::{Deserialize, Serialize};
 
 pub mod external {
+    pub use async_trait;
+    pub use nanoid;
     pub use native_db;
     pub use native_model;
+    pub use serde;
+    pub use tokio;
     pub use tokio_tungstenite;
 }
 
