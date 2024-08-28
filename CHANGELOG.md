@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.4
+
+* add get_server_ip for ServerSender.
+
 ## 0.1.3
 
 * add export get_id.
