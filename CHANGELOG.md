@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.10
+
+* Fixed for default value in watch message handle.
+
 ## 0.1.9
 
 * Add options for client and server. ( use_ping )

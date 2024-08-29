@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bebop::Record;
+use bebop::{Record, SliceWrapper};
 use tokio::{
     sync::{mpsc::Sender, watch, RwLock},
     time::sleep,
@@ -26,7 +26,15 @@ pub struct ClientSenders {
 
 impl ClientSenders {
     pub fn new() -> Self {
-        let (handle_message_sx, _) = watch::channel((vec![0_u8], "".into()));
+        let data = vec![0_u8];
+        let mut buf = vec![];
+        Data {
+            category: 0,
+            datas: SliceWrapper::from_raw(&data),
+        }
+        .serialize(&mut buf)
+        .unwrap();
+        let (handle_message_sx, _) = watch::channel((buf, "".into()));
         Self {
             lists: Vec::new(),
             handle_message_sx,

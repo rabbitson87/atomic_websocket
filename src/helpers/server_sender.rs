@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bebop::Record;
+use bebop::{Record, SliceWrapper};
 use native_db::Database;
 use tokio::{
     sync::{
@@ -47,8 +47,16 @@ impl ServerSender {
         server_ip: String,
         options: ClientOptions,
     ) -> Self {
+        let data = vec![0_u8];
+        let mut buf = vec![];
+        Data {
+            category: 0,
+            datas: SliceWrapper::from_raw(&data),
+        }
+        .serialize(&mut buf)
+        .unwrap();
         let (status_sx, _) = watch::channel(SenderStatus::Start);
-        let (handle_message_sx, _) = watch::channel(vec![0_u8]);
+        let (handle_message_sx, _) = watch::channel(buf);
         Self {
             sx: None,
             db,
