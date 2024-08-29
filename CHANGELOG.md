@@ -1,5 +1,9 @@
 # Changes
 
+## 0.1.8
+
+* add clone for Settings struct, remove export serde in external.
+
 ## 0.1.7
 
 * add export external list.
@@ -8,7 +12,7 @@
   nanoid,
   serde,
   tokio
-  
+
 ## 0.1.6
 
 * add partialEqual for SenderStatus.

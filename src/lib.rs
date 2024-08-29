@@ -10,7 +10,6 @@ pub mod external {
     pub use nanoid;
     pub use native_db;
     pub use native_model;
-    pub use serde;
     pub use tokio;
     pub use tokio_tungstenite;
 }
@@ -39,7 +38,7 @@ use tokio::sync::RwLock;
 mod generated;
 mod helpers;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[native_model(id = 1004, version = 1)]
 #[native_db]
 pub struct Settings {
