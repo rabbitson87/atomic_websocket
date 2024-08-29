@@ -14,12 +14,14 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     dev_print,
-    generated::schema::{Data, SaveKey, WindowAppConnectInfo},
+    generated::schema::{Data, SaveKey, ServerConnectInfo},
     helpers::{common::get_setting_by_key, get_websocket::wrap_get_websocket, traits::StringUtil},
     Settings,
 };
 
 use crate::helpers::traits::date_time::now;
+
+use super::internal_client::ClientOptions;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SenderStatus {
@@ -36,10 +38,15 @@ pub struct ServerSender {
     pub server_send_times: i64,
     status_sx: Sender<SenderStatus>,
     handle_message_sx: Sender<Vec<u8>>,
+    pub options: ClientOptions,
 }
 
 impl ServerSender {
-    pub fn new(db: Arc<RwLock<Database<'static>>>, server_ip: String) -> Self {
+    pub fn new(
+        db: Arc<RwLock<Database<'static>>>,
+        server_ip: String,
+        options: ClientOptions,
+    ) -> Self {
         let (status_sx, _) = watch::channel(SenderStatus::Start);
         let (handle_message_sx, _) = watch::channel(vec![0_u8]);
         Self {
@@ -50,6 +57,7 @@ impl ServerSender {
             server_send_times: 0,
             status_sx,
             handle_message_sx,
+            options,
         }
     }
     pub fn get_status_receiver(&self) -> Receiver<SenderStatus> {
@@ -102,6 +110,7 @@ impl ServerSender {
                                         self.db.clone(),
                                         self.server_sender.as_ref().unwrap().clone(),
                                         self.server_ip.copy_string(),
+                                        self.options.clone(),
                                     ));
                                     break;
                                 }
@@ -138,7 +147,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         dev_print!("set start server_ip: {:?}", server_ip);
         let window_app_connect_info = match get_setting_by_key(
             clone.db.clone(),
-            format!("{:?}", SaveKey::WindowAppConnectInfo),
+            format!("{:?}", SaveKey::ServerConnectInfo),
         )
         .await
         {
@@ -150,7 +159,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         };
         match window_app_connect_info {
             Some(data) => {
-                let mut data = WindowAppConnectInfo::deserialize(&data.value).unwrap();
+                let mut data = ServerConnectInfo::deserialize(&data.value).unwrap();
 
                 let mut before_value = Vec::new();
                 data.serialize(&mut before_value).unwrap();
@@ -164,11 +173,11 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
                 writer
                     .update::<Settings>(
                         Settings {
-                            key: format!("{:?}", SaveKey::WindowAppConnectInfo),
+                            key: format!("{:?}", SaveKey::ServerConnectInfo),
                             value: before_value,
                         },
                         Settings {
-                            key: format!("{:?}", SaveKey::WindowAppConnectInfo),
+                            key: format!("{:?}", SaveKey::ServerConnectInfo),
                             value,
                         },
                     )

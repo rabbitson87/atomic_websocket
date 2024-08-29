@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use helpers::{internal_client::AtomicClient, internal_server::AtomicServer};
+use helpers::{
+    internal_client::{AtomicClient, ClientOptions},
+    internal_server::{AtomicServer, ServerOptions},
+};
 use native_db::{native_db, Database, ToKey};
 use native_model::{native_model, Model};
 use serde::{Deserialize, Serialize};
@@ -20,10 +23,11 @@ pub mod schema {
 
 pub mod client_sender {
     pub use crate::helpers::client_sender::*;
+    pub use crate::helpers::internal_server::ServerOptions;
 }
 
 pub mod server_sender {
-    pub use crate::helpers::internal_client::get_connect;
+    pub use crate::helpers::internal_client::{get_connect, ClientOptions};
     pub use crate::helpers::server_sender::*;
 }
 
@@ -50,16 +54,26 @@ pub struct Settings {
 pub struct AtomicWebsocket {}
 
 impl AtomicWebsocket {
-    pub async fn get_internal_client(db: Arc<RwLock<Database<'static>>>) -> AtomicClient {
-        let mut server_sender = Arc::new(RwLock::new(ServerSender::new(db.clone(), "".into())));
+    pub async fn get_internal_client(
+        db: Arc<RwLock<Database<'static>>>,
+        options: ClientOptions,
+    ) -> AtomicClient {
+        let mut server_sender = Arc::new(RwLock::new(ServerSender::new(
+            db.clone(),
+            "".into(),
+            options.clone(),
+        )));
         server_sender.regist(server_sender.clone()).await;
 
-        let atomic_websocket: AtomicClient = AtomicClient { server_sender };
+        let atomic_websocket: AtomicClient = AtomicClient {
+            server_sender,
+            options,
+        };
         atomic_websocket.initialize(db.clone()).await;
         atomic_websocket
     }
 
-    pub async fn get_internal_server(addr: String) -> AtomicServer {
-        AtomicServer::new(&addr).await
+    pub async fn get_internal_server(addr: String, option: ServerOptions) -> AtomicServer {
+        AtomicServer::new(&addr, option).await
     }
 }

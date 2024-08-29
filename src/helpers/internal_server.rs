@@ -30,11 +30,22 @@ pub struct AtomicServer {
     pub client_senders: Arc<RwLock<ClientSenders>>,
 }
 
+#[derive(Clone)]
+pub struct ServerOptions {
+    pub use_ping: bool,
+}
+
+impl Default for ServerOptions {
+    fn default() -> Self {
+        Self { use_ping: true }
+    }
+}
+
 impl AtomicServer {
-    pub async fn new(addr: &str) -> Self {
+    pub async fn new(addr: &str, option: ServerOptions) -> Self {
         let listener = TcpListener::bind(&addr).await.expect("Can't listen");
         let client_senders = Arc::new(RwLock::new(ClientSenders::new()));
-        loop_acceptor(listener, client_senders.clone());
+        loop_acceptor(listener, client_senders.clone(), option);
 
         tokio::spawn(loop_client_checker(client_senders.clone()));
         Self { client_senders }
@@ -56,11 +67,19 @@ pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
     }
 }
 
-pub fn loop_acceptor(listener: TcpListener, client_senders: Arc<RwLock<ClientSenders>>) {
-    tokio::spawn(handle_accept(listener, client_senders));
+pub fn loop_acceptor(
+    listener: TcpListener,
+    client_senders: Arc<RwLock<ClientSenders>>,
+    option: ServerOptions,
+) {
+    tokio::spawn(handle_accept(listener, client_senders, option));
 }
 
-pub async fn handle_accept(listener: TcpListener, client_senders: Arc<RwLock<ClientSenders>>) {
+pub async fn handle_accept(
+    listener: TcpListener,
+    client_senders: Arc<RwLock<ClientSenders>>,
+    option: ServerOptions,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -68,7 +87,7 @@ pub async fn handle_accept(listener: TcpListener, client_senders: Arc<RwLock<Cli
                     .peer_addr()
                     .expect("connected streams should have a peer address");
                 dev_print!("Peer address: {}", peer);
-                accept_connection(client_senders.clone(), peer, stream).await;
+                accept_connection(client_senders.clone(), peer, stream, &option).await;
             }
             Err(e) => {
                 dev_print!("Error accepting connection: {:?}", e);
@@ -81,8 +100,9 @@ pub async fn accept_connection(
     client_senders: Arc<RwLock<ClientSenders>>,
     peer: SocketAddr,
     stream: TcpStream,
+    option: &ServerOptions,
 ) {
-    if let Err(e) = handle_connection(client_senders.clone(), peer, stream).await {
+    if let Err(e) = handle_connection(client_senders.clone(), peer, stream, option).await {
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
             err => println!("Error processing connection: {}", err),
@@ -94,24 +114,30 @@ pub async fn handle_connection(
     client_senders: Arc<RwLock<ClientSenders>>,
     peer: SocketAddr,
     stream: TcpStream,
+    option: &ServerOptions,
 ) -> tungstenite::Result<()> {
     match accept_async(stream).await {
         Ok(ws_stream) => {
             dev_print!("New WebSocket connection: {}", peer);
             let (mut ostream, mut istream) = ws_stream.split();
 
+            let use_ping = option.use_ping;
             let (sx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(1024);
             tokio::spawn(async move {
-                let id =
-                    get_id_from_first_message(&mut istream, client_senders.clone(), sx.clone())
-                        .await;
+                let id = get_id_from_first_message(
+                    &mut istream,
+                    client_senders.clone(),
+                    sx.clone(),
+                    use_ping,
+                )
+                .await;
 
                 match id {
                     Some(id) => {
                         drop(sx);
                         while let Some(Ok(Message::Binary(value))) = istream.next().await {
                             if let Ok(data) = Data::deserialize(&value) {
-                                if data.category == Category::Ping as u16 {
+                                if data.category == Category::Ping as u16 && use_ping {
                                     if let Ok(data) = Ping::deserialize(&data.datas) {
                                         client_senders
                                             .send(data.peer.into(), make_pong_message())
@@ -157,6 +183,7 @@ async fn get_id_from_first_message(
     istream: &mut SplitStream<WebSocketStream<TcpStream>>,
     client_senders: Arc<RwLock<ClientSenders>>,
     sx: Sender<Message>,
+    use_ping: bool,
 ) -> Option<String> {
     let mut _id: Option<String> = None;
     if let Some(Ok(Message::Binary(value))) = istream.next().await {
@@ -168,9 +195,11 @@ async fn get_id_from_first_message(
                     client_senders
                         .add(_id.as_ref().unwrap().copy_string(), sx)
                         .await;
-                    client_senders
-                        .send(_id.as_ref().unwrap().copy_string(), make_pong_message())
-                        .await;
+                    if use_ping {
+                        client_senders
+                            .send(_id.as_ref().unwrap().copy_string(), make_pong_message())
+                            .await;
+                    }
                 }
             }
         }

@@ -1,12 +1,16 @@
 # Changes
 
+## 0.1.9
+
+* Add options for client and server. ( use_ping )
+
 ## 0.1.8
 
-* add clone for Settings struct, remove export serde in external.
+* Add clone for Settings struct, remove export serde in external.
 
 ## 0.1.7
 
-* add export external list.
+* Add export external list.
 
   async_trait,
   nanoid,
@@ -15,19 +19,19 @@
 
 ## 0.1.6
 
-* add partialEqual for SenderStatus.
+* Add partialEqual for SenderStatus.
 
 ## 0.1.5
 
-* add get_connect for client.
+* Add get_connect for client.
 
 ## 0.1.4
 
-* add get_server_ip for ServerSender.
+* Add get_server_ip for ServerSender.
 
 ## 0.1.3
 
-* add export get_id.
+* Add export get_id.
 
 ## 0.1.2
 

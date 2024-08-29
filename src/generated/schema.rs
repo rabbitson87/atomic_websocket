@@ -76,7 +76,7 @@ pub enum Category {
     AppStartup = 10004,
     AppStartupOutput = 10005,
     SaveData = 10006,
-    WindowAppConnectInfo = 10007,
+    ServerConnectInfo = 10007,
     ValidClient = 10008,
     ClientId = 10009,
 }
@@ -93,7 +93,7 @@ impl ::core::convert::TryFrom<u32> for Category {
             10004 => Ok(Category::AppStartup),
             10005 => Ok(Category::AppStartupOutput),
             10006 => Ok(Category::SaveData),
-            10007 => Ok(Category::WindowAppConnectInfo),
+            10007 => Ok(Category::ServerConnectInfo),
             10008 => Ok(Category::ValidClient),
             10009 => Ok(Category::ClientId),
             d => Err(::bebop::DeserializeError::InvalidEnumDiscriminator(
@@ -113,7 +113,7 @@ impl ::core::convert::From<Category> for u32 {
             Category::AppStartup => 10004,
             Category::AppStartupOutput => 10005,
             Category::SaveData => 10006,
-            Category::WindowAppConnectInfo => 10007,
+            Category::ServerConnectInfo => 10007,
             Category::ValidClient => 10008,
             Category::ClientId => 10009,
         }
@@ -441,7 +441,7 @@ impl<'raw> ::bebop::Record<'raw> for SaveData<'raw> {}
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SaveKey {
-    WindowAppConnectInfo = 1,
+    ServerConnectInfo = 1,
     ValidClient = 2,
     ClientId = 3,
 }
@@ -451,7 +451,7 @@ impl ::core::convert::TryFrom<u32> for SaveKey {
 
     fn try_from(value: u32) -> ::bebop::DeResult<Self> {
         match value {
-            1 => Ok(SaveKey::WindowAppConnectInfo),
+            1 => Ok(SaveKey::ServerConnectInfo),
             2 => Ok(SaveKey::ValidClient),
             3 => Ok(SaveKey::ClientId),
             d => Err(::bebop::DeserializeError::InvalidEnumDiscriminator(
@@ -464,7 +464,7 @@ impl ::core::convert::TryFrom<u32> for SaveKey {
 impl ::core::convert::From<SaveKey> for u32 {
     fn from(value: SaveKey) -> Self {
         match value {
-            SaveKey::WindowAppConnectInfo => 1,
+            SaveKey::ServerConnectInfo => 1,
             SaveKey::ValidClient => 2,
             SaveKey::ClientId => 3,
         }
@@ -496,7 +496,7 @@ impl ::bebop::FixedSized for SaveKey {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct WindowAppConnectInfo<'raw> {
+pub struct ServerConnectInfo<'raw> {
     pub current_ip: &'raw str,
     pub broadcast_ip: &'raw str,
     pub gateway_ip: &'raw str,
@@ -504,7 +504,7 @@ pub struct WindowAppConnectInfo<'raw> {
     pub port: &'raw str,
 }
 
-impl<'raw> ::bebop::SubRecord<'raw> for WindowAppConnectInfo<'raw> {
+impl<'raw> ::bebop::SubRecord<'raw> for ServerConnectInfo<'raw> {
     const MIN_SERIALIZED_SIZE: usize = <&'raw str>::MIN_SERIALIZED_SIZE
         + <&'raw str>::MIN_SERIALIZED_SIZE
         + <&'raw str>::MIN_SERIALIZED_SIZE
@@ -561,7 +561,7 @@ impl<'raw> ::bebop::SubRecord<'raw> for WindowAppConnectInfo<'raw> {
     }
 }
 
-impl<'raw> ::bebop::Record<'raw> for WindowAppConnectInfo<'raw> {}
+impl<'raw> ::bebop::Record<'raw> for ServerConnectInfo<'raw> {}
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 #[repr(packed)]
@@ -884,7 +884,7 @@ pub mod owned {
     pub use super::SaveKey;
 
     #[derive(Clone, Debug, PartialEq)]
-    pub struct WindowAppConnectInfo {
+    pub struct ServerConnectInfo {
         pub current_ip: String,
         pub broadcast_ip: String,
         pub gateway_ip: String,
@@ -892,8 +892,8 @@ pub mod owned {
         pub port: String,
     }
 
-    impl<'raw> ::core::convert::From<super::WindowAppConnectInfo<'raw>> for WindowAppConnectInfo {
-        fn from(value: super::WindowAppConnectInfo) -> Self {
+    impl<'raw> ::core::convert::From<super::ServerConnectInfo<'raw>> for ServerConnectInfo {
+        fn from(value: super::ServerConnectInfo) -> Self {
             Self {
                 current_ip: value.current_ip.into(),
                 broadcast_ip: value.broadcast_ip.into(),
@@ -904,7 +904,7 @@ pub mod owned {
         }
     }
 
-    impl<'raw> ::bebop::SubRecord<'raw> for WindowAppConnectInfo {
+    impl<'raw> ::bebop::SubRecord<'raw> for ServerConnectInfo {
         const MIN_SERIALIZED_SIZE: usize = <String>::MIN_SERIALIZED_SIZE
             + <String>::MIN_SERIALIZED_SIZE
             + <String>::MIN_SERIALIZED_SIZE
@@ -961,7 +961,7 @@ pub mod owned {
         }
     }
 
-    impl<'raw> ::bebop::Record<'raw> for WindowAppConnectInfo {}
+    impl<'raw> ::bebop::Record<'raw> for ServerConnectInfo {}
 
     pub use super::ValidClient;
 }

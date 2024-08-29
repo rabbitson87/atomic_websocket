@@ -12,7 +12,7 @@ enum Category {
     AppStartup = 10004;
     AppStartupOutput = 10005;
     SaveData = 10006;
-    WindowAppConnectInfo = 10007;
+    ServerConnectInfo = 10007;
     ValidClient = 10008;
     ClientId = 10009;
 }
@@ -50,12 +50,12 @@ struct SaveData {
 }
 
 enum SaveKey {
-    WindowAppConnectInfo = 1;
+    ServerConnectInfo = 1;
     ValidClient = 2;
     ClientId = 3;
 }
 
-struct WindowAppConnectInfo {
+struct ServerConnectInfo {
     string currentIp;
     string broadcastIp;
     string gatewayIp;

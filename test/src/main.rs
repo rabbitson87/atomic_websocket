@@ -7,9 +7,10 @@ use std::{
 };
 
 use atomic_websocket::{
+    client_sender::ServerOptions,
     external::native_db::{Builder, Database, Models},
-    schema::WindowAppConnectInfo,
-    server_sender::SenderStatus,
+    schema::ServerConnectInfo,
+    server_sender::{ClientOptions, SenderStatus},
     AtomicWebsocket, Settings,
 };
 use tokio::{
@@ -31,8 +32,11 @@ async fn main() {
 }
 
 async fn server_start(address: String) {
-    let server = AtomicWebsocket::get_internal_server(address).await;
-    let handle_message_receiver = server.get_handle_message_receiver().await;
+    let mut option = ServerOptions::default();
+    option.use_ping = false;
+
+    let atomic_server = AtomicWebsocket::get_internal_server(address, option).await;
+    let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
 
     tokio::spawn(receive_server_handle_message(handle_message_receiver));
 }
@@ -59,17 +63,19 @@ async fn client_start(port: &str) {
     let db = make_db(models, current_path);
     let db = Arc::new(RwLock::new(db));
 
-    let client = AtomicWebsocket::get_internal_client(db.clone()).await;
+    let mut client_options = ClientOptions::default();
+    client_options.use_ping = false;
+    let atomic_client = AtomicWebsocket::get_internal_client(db.clone(), client_options).await;
 
-    let status_receiver = client.get_status_receiver().await;
-    let handle_message_receiver = client.get_handle_message_receiver().await;
+    let status_receiver = atomic_client.get_status_receiver().await;
+    let handle_message_receiver = atomic_client.get_handle_message_receiver().await;
 
     tokio::spawn(receive_status(status_receiver));
     tokio::spawn(receive_handle_message(handle_message_receiver));
 
-    let _ = client
+    let _ = atomic_client
         .get_connect(
-            Some(WindowAppConnectInfo {
+            Some(ServerConnectInfo {
                 current_ip: "192.168.200.194",
                 broadcast_ip: "192.168.200.255",
                 gateway_ip: "192.168.200.254",

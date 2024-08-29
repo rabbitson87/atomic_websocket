@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::{sync::Arc, time::Duration};
 
-use crate::generated::schema::{SaveKey, WindowAppConnectInfo};
+use crate::generated::schema::{SaveKey, ServerConnectInfo};
 use crate::helpers::{
     common::{get_setting_by_key, make_ping_message},
     get_websocket::{get_id, wrap_get_websocket},
@@ -19,22 +19,37 @@ use native_db::Database;
 use tokio::sync::watch::Receiver;
 use tokio::sync::RwLock;
 
+#[derive(Clone)]
+pub struct ClientOptions {
+    pub use_ping: bool,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self { use_ping: true }
+    }
+}
+
 pub struct AtomicClient {
     pub server_sender: Arc<RwLock<ServerSender>>,
+    pub options: ClientOptions,
 }
 
 impl AtomicClient {
     pub async fn initialize(&self, db: Arc<RwLock<Database<'static>>>) {
         self.regist_id(db.clone()).await;
-        tokio::spawn(ping_loop_cheker(self.server_sender.clone()));
+        tokio::spawn(ping_loop_cheker(
+            self.server_sender.clone(),
+            self.options.clone(),
+        ));
     }
 
     pub async fn get_connect(
         &self,
-        input: Option<WindowAppConnectInfo<'_>>,
+        input: Option<ServerConnectInfo<'_>>,
         db: Arc<RwLock<Database<'static>>>,
     ) -> Result<(), Box<dyn Error>> {
-        get_connect(input, db, self.server_sender.clone()).await
+        get_connect(input, db, self.server_sender.clone(), self.options.clone()).await
     }
 
     pub async fn regist_id(&self, db: Arc<RwLock<Database<'static>>>) {
@@ -74,7 +89,7 @@ impl AtomicClient {
     }
 }
 
-async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>) {
+async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, options: ClientOptions) {
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
         let mut server_sender_clone = server_sender.write().await;
@@ -87,7 +102,7 @@ async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>) {
 
             let window_app_connect_info = match get_setting_by_key(
                 server_sender_clone.db.clone(),
-                format!("{:?}", SaveKey::WindowAppConnectInfo),
+                format!("{:?}", SaveKey::ServerConnectInfo),
             )
             .await
             {
@@ -99,7 +114,7 @@ async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>) {
             };
             if let Some(window_app_connect_info) = window_app_connect_info {
                 let mut info =
-                    WindowAppConnectInfo::deserialize(&window_app_connect_info.value).unwrap();
+                    ServerConnectInfo::deserialize(&window_app_connect_info.value).unwrap();
                 info.server_ip = "".into();
                 let mut value = Vec::new();
                 info.serialize(&mut value).unwrap();
@@ -109,7 +124,7 @@ async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>) {
                     .update::<Settings>(
                         window_app_connect_info,
                         Settings {
-                            key: format!("{:?}", SaveKey::WindowAppConnectInfo),
+                            key: format!("{:?}", SaveKey::ServerConnectInfo),
                             value,
                         },
                     )
@@ -120,11 +135,12 @@ async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>) {
             drop(server_sender_clone);
             let server_sender_clone = server_sender.clone();
             let server_sender_clone2 = server_sender.clone();
+            let options_clone = options.clone();
             tokio::spawn(async move {
                 let server_sender_clone = server_sender_clone.read().await;
                 let db = server_sender_clone.db.clone();
                 drop(server_sender_clone);
-                let _ = get_connect(None, db, server_sender_clone2).await;
+                let _ = get_connect(None, db, server_sender_clone2, options_clone).await;
                 true
             });
         } else if server_sender_clone.server_send_times + 30 < now().timestamp() {
@@ -143,16 +159,17 @@ async fn ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>) {
 }
 
 pub async fn get_connect(
-    input: Option<WindowAppConnectInfo<'_>>,
+    input: Option<ServerConnectInfo<'_>>,
     db: Arc<RwLock<Database<'static>>>,
     server_sender: Arc<RwLock<ServerSender>>,
+    options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
     if server_sender.is_valid_server_ip().await {
         server_sender.send_status(SenderStatus::Connected);
         return Ok(());
     }
     let window_app_connect_info =
-        get_setting_by_key(db.clone(), format!("{:?}", SaveKey::WindowAppConnectInfo)).await?;
+        get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await?;
     dev_print!("window_app_connect_info: {:?}", window_app_connect_info);
 
     if input.is_some() && window_app_connect_info.is_none() {
@@ -160,7 +177,7 @@ pub async fn get_connect(
         let db_clone = db.read().await;
         let writer = db_clone.rw_transaction()?;
         let mut value = Vec::new();
-        WindowAppConnectInfo {
+        ServerConnectInfo {
             current_ip: &input.current_ip,
             broadcast_ip: &input.broadcast_ip,
             gateway_ip: &input.gateway_ip,
@@ -169,7 +186,7 @@ pub async fn get_connect(
         }
         .serialize(&mut value)?;
         writer.insert::<Settings>(Settings {
-            key: format!("{:?}", SaveKey::WindowAppConnectInfo),
+            key: format!("{:?}", SaveKey::ServerConnectInfo),
             value,
         })?;
         writer.commit()?;
@@ -182,13 +199,13 @@ pub async fn get_connect(
     }
 
     let connect_info_data = match input.as_ref() {
-        Some(info) => WindowAppConnectInfo {
+        Some(info) => ServerConnectInfo {
             current_ip: &info.current_ip,
             broadcast_ip: &info.broadcast_ip,
             gateway_ip: &info.gateway_ip,
             server_ip: match window_app_connect_info.as_ref() {
                 Some(window_app_connect_info) => {
-                    WindowAppConnectInfo::deserialize(&window_app_connect_info.value)
+                    ServerConnectInfo::deserialize(&window_app_connect_info.value)
                         .unwrap()
                         .server_ip
                 }
@@ -196,7 +213,7 @@ pub async fn get_connect(
             },
             port: &info.port,
         },
-        None => WindowAppConnectInfo::deserialize(&window_app_connect_info.as_ref().unwrap().value)
+        None => ServerConnectInfo::deserialize(&window_app_connect_info.as_ref().unwrap().value)
             .unwrap(),
     };
 
@@ -225,6 +242,7 @@ pub async fn get_connect(
                         db_clone,
                         server_sender_clone,
                         server_url.copy_string(),
+                        options.clone(),
                     ));
                 }
                 if ip == 255 {
@@ -243,6 +261,7 @@ pub async fn get_connect(
                 db_clone,
                 server_sender_clone,
                 server_url.copy_string(),
+                options.clone(),
             ));
         }
     }

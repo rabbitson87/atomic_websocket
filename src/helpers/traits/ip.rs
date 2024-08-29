@@ -1,4 +1,4 @@
-use crate::generated::schema::WindowAppConnectInfo;
+use crate::generated::schema::ServerConnectInfo;
 
 pub struct IpInfo {
     data: (Vec<u8>, u8, String),
@@ -35,7 +35,7 @@ pub trait GetIp {
     fn get_ip_range(&self) -> IpInfo;
 }
 
-impl GetIp for WindowAppConnectInfo<'_> {
+impl GetIp for ServerConnectInfo<'_> {
     fn get_ip_range(&self) -> IpInfo {
         IpInfo::new(
             (

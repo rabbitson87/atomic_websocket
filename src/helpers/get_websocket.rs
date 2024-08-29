@@ -21,12 +21,15 @@ use crate::{
     Settings,
 };
 
+use super::internal_client::ClientOptions;
+
 pub async fn wrap_get_websocket(
     db: Arc<RwLock<Database<'static>>>,
     server_sender: Arc<RwLock<ServerSender>>,
     server_ip: String,
+    options: ClientOptions,
 ) -> bool {
-    match get_websocket(db, server_sender, server_ip).await {
+    match get_websocket(db, server_sender, server_ip, options).await {
         Ok(_) => true,
         Err(e) => {
             println!("Error getting websocket: {:?}", e);
@@ -39,6 +42,7 @@ pub async fn get_websocket(
     db: Arc<RwLock<Database<'static>>>,
     server_sender: Arc<RwLock<ServerSender>>,
     server_ip: String,
+    options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     dev_print!("Connecting to {}", server_ip);
     if let Ok((ws_stream, _)) = connect_async(&server_ip).await {
@@ -50,8 +54,10 @@ pub async fn get_websocket(
         let id = get_id(db.clone()).await;
         server_sender.add(sx, server_ip).await;
 
-        dev_print!("Client send message: {:?}", make_ping_message(&id));
-        server_sender.send(make_ping_message(&id)).await;
+        if options.use_ping {
+            dev_print!("Client send message: {:?}", make_ping_message(&id));
+            server_sender.send(make_ping_message(&id)).await;
+        }
 
         server_sender.send_status(SenderStatus::Connected);
         tokio::spawn(async move {
