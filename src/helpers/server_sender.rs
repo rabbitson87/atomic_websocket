@@ -15,7 +15,10 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::{
     dev_print,
     generated::schema::{Data, SaveKey, ServerConnectInfo},
-    helpers::{common::get_setting_by_key, get_websocket::wrap_get_websocket, traits::StringUtil},
+    helpers::{
+        common::get_setting_by_key, get_internal_websocket::wrap_get_internal_websocket,
+        traits::StringUtil,
+    },
     Settings,
 };
 
@@ -114,7 +117,7 @@ impl ServerSender {
                             }
                             Err(e) => {
                                 if count > 5 {
-                                    tokio::spawn(wrap_get_websocket(
+                                    tokio::spawn(wrap_get_internal_websocket(
                                         self.db.clone(),
                                         self.server_sender.as_ref().unwrap().clone(),
                                         self.server_ip.copy_string(),
@@ -153,19 +156,19 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         clone.add(sx, server_ip.copy_string());
 
         dev_print!("set start server_ip: {:?}", server_ip);
-        let window_app_connect_info = match get_setting_by_key(
+        let server_connect_info = match get_setting_by_key(
             clone.db.clone(),
             format!("{:?}", SaveKey::ServerConnectInfo),
         )
         .await
         {
-            Ok(window_app_connect_info) => window_app_connect_info,
+            Ok(server_connect_info) => server_connect_info,
             Err(error) => {
-                dev_print!("Failed to get window_app_connect_info {error:?}");
+                dev_print!("Failed to get server_connect_info {error:?}");
                 None
             }
         };
-        match window_app_connect_info {
+        match server_connect_info {
             Some(data) => {
                 let mut data = ServerConnectInfo::deserialize(&data.value).unwrap();
 

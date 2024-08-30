@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.0
+
+* Add outer connect client. 
+
 ## 0.1.10
 
 * Fixed for default value in watch message handle.

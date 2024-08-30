@@ -57,13 +57,14 @@ dependencies = [
 
 [[package]]
 name = "atomic_websocket"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bebop",
  "chrono",
  "futures-util",
  "nanoid",
+ "native-tls",
  "native_db",
  "native_model",
  "serde",
@@ -1377,7 +1378,9 @@ checksum = "c6989540ced10490aaf14e6bad2e3d33728a2813310a0c71d1574304c49631cd"
 dependencies = [
  "futures-util",
  "log",
+ "native-tls",
  "tokio",
+ "tokio-native-tls",
  "tungstenite",
 ]
 
@@ -1437,6 +1440,7 @@ dependencies = [
  "http 1.1.0",
  "httparse",
  "log",
+ "native-tls",
  "rand",
  "sha1",
  "thiserror",

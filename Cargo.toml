@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.1.10"
+version = "0.2.0"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -23,10 +23,11 @@ native_model = "0.4.19"
 tokio-tungstenite = "0.23.1"
 nanoid = "0.4.0"
 serde = { version = "1.0.209", features = ["derive"] }
+futures-util = "0.3.30"
 
 bebop = "3.0.14"
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
-futures-util = "0.3.30"
+native-tls = { version = "0.2.12", optional = true }
 
 [workspace]
 members = ["make_bebop", "test"]
@@ -34,3 +35,4 @@ members = ["make_bebop", "test"]
 [features]
 default = []
 debug = []
+native_tls = ["dep:native-tls", "tokio-tungstenite/native-tls"]

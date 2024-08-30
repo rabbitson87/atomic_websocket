@@ -24,7 +24,9 @@ async fn main() {
     let address: String = format!("0.0.0.0:{}", port);
 
     tokio::spawn(server_start(address.clone()));
-    tokio::spawn(client_start(port));
+    tokio::spawn(internal_client_start(port));
+
+    tokio::spawn(outer_client_start());
 
     loop {
         sleep(Duration::from_secs(100)).await;
@@ -51,7 +53,32 @@ pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, Stri
     }
 }
 
-async fn client_start(port: &str) {
+async fn outer_client_start() {
+    let current_path = match get_db_path() {
+        Ok(path) => path,
+        Err(error) => {
+            println!("Failed to get db path {error:?}");
+            return;
+        }
+    };
+    let models = make_models();
+    let db = make_db(models, current_path);
+    let db = Arc::new(RwLock::new(db));
+
+    let mut client_options = ClientOptions::default();
+    client_options.url = "example.com/websocket".into();
+    let atomic_client = AtomicWebsocket::get_outer_client(db.clone(), client_options).await;
+
+    let status_receiver = atomic_client.get_status_receiver().await;
+    let handle_message_receiver = atomic_client.get_handle_message_receiver().await;
+
+    tokio::spawn(receive_status(status_receiver));
+    tokio::spawn(receive_handle_message(handle_message_receiver));
+
+    let _ = atomic_client.get_outer_connect(db.clone()).await;
+}
+
+async fn internal_client_start(port: &str) {
     let current_path = match get_db_path() {
         Ok(path) => path,
         Err(error) => {
@@ -74,7 +101,7 @@ async fn client_start(port: &str) {
     tokio::spawn(receive_handle_message(handle_message_receiver));
 
     let _ = atomic_client
-        .get_connect(
+        .get_internal_connect(
             Some(ServerConnectInfo {
                 current_ip: "192.168.200.194",
                 broadcast_ip: "192.168.200.255",
