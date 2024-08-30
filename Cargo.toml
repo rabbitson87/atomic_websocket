@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -11,7 +11,7 @@ edition = "2021"
 rust-version = "1.77"
 
 [dependencies]
-tokio = { version = "1.39.3", default-features = false, features = [
+tokio = { version = "1.40.0", default-features = false, features = [
     "sync",
     "macros",
     "time",
@@ -22,11 +22,11 @@ native_db = "0.7.1"
 native_model = "0.4.19"
 tokio-tungstenite = "0.23.1"
 nanoid = "0.4.0"
-serde = { version = "1.0.209", features = ["derive"] }
 futures-util = "0.3.30"
 
 bebop = "3.0.14"
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
+serde = { version = "1.0.209", features = ["derive"] }
 native-tls = { version = "0.2.12", optional = true }
 
 [workspace]

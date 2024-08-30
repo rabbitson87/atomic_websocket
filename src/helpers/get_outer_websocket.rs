@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::helpers::get_internal_websocket::handle_websocket;
 use native_db::Database;
 #[cfg(feature = "native_tls")]
 use native_tls::TlsConnector;
@@ -55,8 +56,6 @@ pub async fn get_outer_websocket(
     server_sender: Arc<RwLock<ServerSender>>,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    use crate::helpers::get_internal_websocket::handle_websocket;
-
     let url = format!("ws://{}", &options.url);
     dev_print!("Connecting to WebSocket server: {:?}", &url);
     if let Ok((ws_stream, _)) = connect_async(&url).await {

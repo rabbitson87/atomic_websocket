@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.1
+
+* Fixed for native_tls connector missing dependency. 
+
 ## 0.2.0
 
 * Add outer connect client. 
