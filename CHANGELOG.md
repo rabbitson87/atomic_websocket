@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.2
+
+* Fixed for server acceptor with spawn.
+
 ## 0.2.1
 
 * Fixed for native_tls connector missing dependency. 

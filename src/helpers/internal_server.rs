@@ -45,7 +45,7 @@ impl AtomicServer {
     pub async fn new(addr: &str, option: ServerOptions) -> Self {
         let listener = TcpListener::bind(&addr).await.expect("Can't listen");
         let client_senders = Arc::new(RwLock::new(ClientSenders::new()));
-        loop_acceptor(listener, client_senders.clone(), option);
+        tokio::spawn(handle_accept(listener, client_senders.clone(), option));
 
         tokio::spawn(loop_client_checker(client_senders.clone()));
         Self { client_senders }
@@ -67,14 +67,6 @@ pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
     }
 }
 
-pub fn loop_acceptor(
-    listener: TcpListener,
-    client_senders: Arc<RwLock<ClientSenders>>,
-    option: ServerOptions,
-) {
-    tokio::spawn(handle_accept(listener, client_senders, option));
-}
-
 pub async fn handle_accept(
     listener: TcpListener,
     client_senders: Arc<RwLock<ClientSenders>>,
@@ -87,7 +79,12 @@ pub async fn handle_accept(
                     .peer_addr()
                     .expect("connected streams should have a peer address");
                 dev_print!("Peer address: {}", peer);
-                accept_connection(client_senders.clone(), peer, stream, &option).await;
+                tokio::spawn(accept_connection(
+                    client_senders.clone(),
+                    peer,
+                    stream,
+                    option.clone(),
+                ));
             }
             Err(e) => {
                 dev_print!("Error accepting connection: {:?}", e);
@@ -100,9 +97,9 @@ pub async fn accept_connection(
     client_senders: Arc<RwLock<ClientSenders>>,
     peer: SocketAddr,
     stream: TcpStream,
-    option: &ServerOptions,
+    option: ServerOptions,
 ) {
-    if let Err(e) = handle_connection(client_senders.clone(), peer, stream, option).await {
+    if let Err(e) = handle_connection(client_senders, peer, stream, option).await {
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
             err => println!("Error processing connection: {}", err),
@@ -114,7 +111,7 @@ pub async fn handle_connection(
     client_senders: Arc<RwLock<ClientSenders>>,
     peer: SocketAddr,
     stream: TcpStream,
-    option: &ServerOptions,
+    option: ServerOptions,
 ) -> tungstenite::Result<()> {
     match accept_async(stream).await {
         Ok(ws_stream) => {
@@ -190,8 +187,8 @@ async fn get_id_from_first_message(
         if let Ok(data) = Data::deserialize(&value) {
             if data.category == Category::Ping as u16 {
                 dev_print!("receive ping from client: {:?}", data);
-                if let Ok(data) = Ping::deserialize(&data.datas) {
-                    _id = Some(data.peer.into());
+                if let Ok(ping) = Ping::deserialize(&data.datas) {
+                    _id = Some(ping.peer.into());
                     client_senders
                         .add(_id.as_ref().unwrap().copy_string(), sx)
                         .await;
@@ -199,6 +196,9 @@ async fn get_id_from_first_message(
                         client_senders
                             .send(_id.as_ref().unwrap().copy_string(), make_pong_message())
                             .await;
+                    } else {
+                        client_senders
+                            .send_handle_message(data, _id.as_ref().unwrap().copy_string());
                     }
                 }
             }

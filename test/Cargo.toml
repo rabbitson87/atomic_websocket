@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.39.3", default-features = false, features = ["fs"] }
+tokio = { version = "1.40.0", default-features = false, features = ["fs"] }
 atomic_websocket = { path = "../", features = ["debug"] }
 
 [profile.dev]

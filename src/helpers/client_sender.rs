@@ -150,6 +150,7 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
         data.serialize(&mut buf).unwrap();
         tokio::spawn(async move {
             let _ = clone.write().await.send_handle_message(buf, peer).await;
+            drop(clone);
         });
     }
 
