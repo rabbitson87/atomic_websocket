@@ -33,11 +33,15 @@ pub struct AtomicServer {
 #[derive(Clone)]
 pub struct ServerOptions {
     pub use_ping: bool,
+    pub proxy_ping: i16,
 }
 
 impl Default for ServerOptions {
     fn default() -> Self {
-        Self { use_ping: true }
+        Self {
+            use_ping: true,
+            proxy_ping: -1,
+        }
     }
 }
 
@@ -118,14 +122,14 @@ pub async fn handle_connection(
             dev_print!("New WebSocket connection: {}", peer);
             let (mut ostream, mut istream) = ws_stream.split();
 
-            let use_ping = option.use_ping;
             let (sx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(1024);
             tokio::spawn(async move {
+                let use_ping = option.use_ping;
                 let id = get_id_from_first_message(
                     &mut istream,
                     client_senders.clone(),
                     sx.clone(),
-                    use_ping,
+                    option,
                 )
                 .await;
 
@@ -180,11 +184,11 @@ async fn get_id_from_first_message(
     istream: &mut SplitStream<WebSocketStream<TcpStream>>,
     client_senders: Arc<RwLock<ClientSenders>>,
     sx: Sender<Message>,
-    use_ping: bool,
+    options: ServerOptions,
 ) -> Option<String> {
     let mut _id: Option<String> = None;
     if let Some(Ok(Message::Binary(value))) = istream.next().await {
-        if let Ok(data) = Data::deserialize(&value) {
+        if let Ok(mut data) = Data::deserialize(&value) {
             if data.category == Category::Ping as u16 {
                 dev_print!("receive ping from client: {:?}", data);
                 if let Ok(ping) = Ping::deserialize(&data.datas) {
@@ -192,11 +196,14 @@ async fn get_id_from_first_message(
                     client_senders
                         .add(_id.as_ref().unwrap().copy_string(), sx)
                         .await;
-                    if use_ping {
+                    if options.use_ping {
                         client_senders
                             .send(_id.as_ref().unwrap().copy_string(), make_pong_message())
                             .await;
                     } else {
+                        if options.proxy_ping > 0 {
+                            data.category = options.proxy_ping as u16;
+                        }
                         client_senders
                             .send_handle_message(data, _id.as_ref().unwrap().copy_string());
                     }

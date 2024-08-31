@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.3
+
+* Add for server proxy ping option.
+
 ## 0.2.2
 
 * Fixed for server acceptor with spawn.
