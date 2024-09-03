@@ -13,7 +13,7 @@ use crate::helpers::{
         StringUtil,
     },
 };
-use crate::{dev_print, Settings};
+use crate::{log_debug, log_error, Settings};
 use bebop::Record;
 use native_db::Database;
 
@@ -135,7 +135,7 @@ async fn internal_ping_loop_cheker(
             {
                 Ok(server_connect_info) => server_connect_info,
                 Err(error) => {
-                    log::error!("Failed to get server_connect_info {error:?}");
+                    log_error!("Failed to get server_connect_info {error:?}");
                     None
                 }
             };
@@ -170,17 +170,17 @@ async fn internal_ping_loop_cheker(
                 true
             });
         } else if server_sender_clone.server_send_times + 30 < now().timestamp() {
-            log::debug!(
+            log_debug!(
                 "send: {:?}, current: {:?}",
                 server_sender_clone.server_send_times,
                 now().timestamp()
             );
-            log::debug!("Try ping from loop checker");
+            log_debug!("Try ping from loop checker");
             let id: String = get_id(server_sender_clone.db.clone()).await;
             server_sender_clone.send(make_ping_message(&id)).await;
             drop(server_sender_clone);
         }
-        log::debug!("loop server checker finish");
+        log_debug!("loop server checker finish");
     }
 }
 
@@ -206,17 +206,17 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
                 true
             });
         } else if server_sender_clone.server_send_times + 30 < now().timestamp() {
-            log::debug!(
+            log_debug!(
                 "send: {:?}, current: {:?}",
                 server_sender_clone.server_send_times,
                 now().timestamp()
             );
-            log::debug!("Try ping from loop checker");
+            log_debug!("Try ping from loop checker");
             let id: String = get_id(server_sender_clone.db.clone()).await;
             server_sender_clone.send(make_ping_message(&id)).await;
             drop(server_sender_clone);
         }
-        log::debug!("loop server checker finish");
+        log_debug!("loop server checker finish");
     }
 }
 
@@ -231,7 +231,7 @@ pub async fn get_outer_connect(
     }
     let server_connect_info =
         get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await?;
-    log::debug!("server_connect_info: {:?}", server_connect_info);
+    log_debug!("server_connect_info: {:?}", server_connect_info);
 
     if !options.url.is_empty() {
         server_sender
@@ -262,7 +262,7 @@ pub async fn get_internal_connect(
     }
     let server_connect_info =
         get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await?;
-    log::debug!("server_connect_info: {:?}", server_connect_info);
+    log_debug!("server_connect_info: {:?}", server_connect_info);
 
     if input.is_some() && server_connect_info.is_none() {
         let input = input.as_ref().unwrap();

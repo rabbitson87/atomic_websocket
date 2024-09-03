@@ -1,5 +1,10 @@
 # Changes
 
+## 0.2.4
+
+* Change for logging system. Thank for Jake Kwak!
+  And Fixed init receive handle_message error.
+
 ## 0.2.3
 
 * Add for server proxy ping option.

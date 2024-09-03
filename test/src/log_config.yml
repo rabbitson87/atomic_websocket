@@ -1,0 +1,46 @@
+appenders:
+  stdout:
+    kind: console
+    encoder:
+      pattern: "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}"
+    filters:
+      - kind: threshold
+        level: info
+  stdout_error:
+    kind: console
+    encoder:
+      pattern: "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}"
+    filters:
+      - kind: threshold
+        level: error
+  stdout_debug:
+    kind: console
+    encoder:
+      pattern: "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}"
+    filters:
+      - kind: threshold
+        level: debug
+  errors:
+    kind: file
+    path: "log/error.log"
+    encoder:
+      pattern: "{d(%+)(local)} [{t}] {h({l})} {M}:{m}{n}"
+    filters:
+      - kind: threshold
+        level: error
+  infos:
+    kind: file
+    path: "log/info.log"
+    encoder:
+      pattern: "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}"
+    filters:
+      - kind: threshold
+        level: info
+
+root:
+  appenders:
+    - infos
+    - errors
+    - stdout
+    - stdout_error
+    - stdout_debug

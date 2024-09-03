@@ -13,13 +13,12 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    dev_print,
     generated::schema::{Data, SaveKey, ServerConnectInfo},
     helpers::{
         common::get_setting_by_key, get_internal_websocket::wrap_get_internal_websocket,
         traits::StringUtil,
     },
-    Settings,
+    log_debug, log_error, Settings,
 };
 
 use crate::helpers::traits::date_time::now;
@@ -53,7 +52,7 @@ impl ServerSender {
         let data = vec![0_u8];
         let mut buf = vec![];
         Data {
-            category: 0,
+            category: 65535,
             datas: SliceWrapper::from_raw(&data),
         }
         .serialize(&mut buf)
@@ -103,7 +102,7 @@ impl ServerSender {
                     self.server_send_times = now().timestamp();
                 }
                 Err(e) => {
-                    log::error!("Error server sending message: {:?}", e);
+                    log_error!("Error server sending message: {:?}", e);
                     self.send_status(SenderStatus::Disconnected).await;
 
                     let mut send_result = false;
@@ -125,7 +124,7 @@ impl ServerSender {
                                     ));
                                     break;
                                 }
-                                log::error!("Error server sending message: {:?}", e);
+                                log_error!("Error server sending message: {:?}", e);
                                 count += 1;
                             }
                         };
@@ -155,7 +154,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         let mut clone = self.write().await;
         clone.add(sx, server_ip.copy_string());
 
-        log::debug!("set start server_ip: {:?}", server_ip);
+        log_debug!("set start server_ip: {:?}", server_ip);
         let server_connect_info = match get_setting_by_key(
             clone.db.clone(),
             format!("{:?}", SaveKey::ServerConnectInfo),
@@ -164,7 +163,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         {
             Ok(server_connect_info) => server_connect_info,
             Err(error) => {
-                log::debug!("Failed to get server_connect_info {error:?}");
+                log_debug!("Failed to get server_connect_info {error:?}");
                 None
             }
         };

@@ -8,9 +8,12 @@ use std::{
 
 use atomic_websocket::{
     client_sender::ServerOptions,
-    external::native_db::{Builder, Database, Models},
+    external::{
+        native_db::{Builder, Database, Models},
+        tokio_tungstenite::tungstenite::client,
+    },
     schema::ServerConnectInfo,
-    server_sender::{ClientOptions, SenderStatus},
+    server_sender::{ClientOptions, SenderStatus, ServerSender, ServerSenderTrait},
     AtomicWebsocket, Settings,
 };
 use tokio::{
@@ -20,13 +23,17 @@ use tokio::{
 
 #[tokio::main]
 async fn main() {
+    let config_str = include_str!("log_config.yml");
+    let config = serde_yaml::from_str(config_str).unwrap();
+    log4rs::init_raw_config(config).unwrap();
+
     let port = "9000";
     let address: String = format!("0.0.0.0:{}", port);
 
     tokio::spawn(server_start(address.clone()));
     tokio::spawn(internal_client_start(port));
 
-    tokio::spawn(outer_client_start());
+    // tokio::spawn(outer_client_start());
 
     loop {
         sleep(Duration::from_secs(100)).await;
@@ -34,8 +41,7 @@ async fn main() {
 }
 
 async fn server_start(address: String) {
-    let mut option = ServerOptions::default();
-    option.use_ping = false;
+    let option = ServerOptions::default();
 
     let atomic_server = AtomicWebsocket::get_internal_server(address, option).await;
     let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
@@ -90,8 +96,7 @@ async fn internal_client_start(port: &str) {
     let db = make_db(models, current_path);
     let db = Arc::new(RwLock::new(db));
 
-    let mut client_options = ClientOptions::default();
-    client_options.use_ping = false;
+    let client_options = ClientOptions::default();
     let atomic_client = AtomicWebsocket::get_internal_client(db.clone(), client_options).await;
 
     let status_receiver = atomic_client.get_status_receiver().await;
@@ -120,6 +125,9 @@ pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
         log::debug!("Status: {:?}", status);
         if status == SenderStatus::Disconnected {
             log::debug!("Disconnected");
+        }
+        if status == SenderStatus::Connected {
+            log::debug!("Connected");
         }
         if receiver.changed().await.is_err() {
             break;

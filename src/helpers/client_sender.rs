@@ -9,11 +9,11 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    dev_print,
     helpers::{
         common::make_disconnect_message,
         traits::{date_time::now, StringUtil},
     },
+    log_debug, log_error,
     schema::Data,
 };
 
@@ -29,7 +29,7 @@ impl ClientSenders {
         let data = vec![0_u8];
         let mut buf = vec![];
         Data {
-            category: 0,
+            category: 65535,
             datas: SliceWrapper::from_raw(&data),
         }
         .serialize(&mut buf)
@@ -43,7 +43,7 @@ impl ClientSenders {
 
     pub async fn add(&mut self, peer: String, sx: Sender<Message>) {
         let list = self.lists.iter().position(|x| x.peer == peer);
-        log::debug!("Add peer: {:?}, list: {:?}", peer, list);
+        log_debug!("Add peer: {:?}, list: {:?}", peer, list);
         match list {
             Some(index) => {
                 let list = self.lists.get_mut(index).unwrap();
@@ -82,7 +82,7 @@ impl ClientSenders {
 
     pub fn remove(&mut self, peer: String) {
         let list = self.lists.iter().position(|x| x.peer == peer);
-        log::debug!("Remove peer: {:?}, list: {:?}", peer, list);
+        log_debug!("Remove peer: {:?}, list: {:?}", peer, list);
         match list {
             Some(index) => {
                 self.lists.remove(index);
@@ -109,7 +109,7 @@ impl ClientSenders {
                                 result = false;
                                 break;
                             }
-                            log::error!("Error client sending message: {:?}", e);
+                            log_error!("Error client sending message: {:?}", e);
                             count += 1;
                         }
                     }

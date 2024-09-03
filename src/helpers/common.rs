@@ -11,10 +11,18 @@ use crate::{
 };
 
 #[macro_export]
-macro_rules! dev_print {
+macro_rules! log_debug {
     ($($rest:tt)*) => {
         if (cfg!(feature = "debug")) {
-            std::println!($($rest)*)
+            log::debug!($($rest)*)
+        }
+    };
+}
+#[macro_export]
+macro_rules! log_error {
+    ($($rest:tt)*) => {
+        if (cfg!(feature = "debug")) {
+            log::error!($($rest)*)
         }
     };
 }

@@ -8,12 +8,12 @@ use tokio::{
 use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
 
 use crate::{
-    dev_print,
     helpers::{
         client_sender::ClientSendersTrait,
         common::{make_disconnect_message, make_pong_message},
         traits::StringUtil,
     },
+    log_debug, log_error,
     schema::{Category, Data, Ping},
 };
 use bebop::Record;
@@ -67,7 +67,7 @@ pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
         let mut server_sender_clone = server_sender_clone.write().await;
         server_sender_clone.check_client_send_time();
         drop(server_sender_clone);
-        log::debug!("loop client cheker finish");
+        log_debug!("loop client cheker finish");
     }
 }
 
@@ -82,7 +82,7 @@ pub async fn handle_accept(
                 let peer = stream
                     .peer_addr()
                     .expect("connected streams should have a peer address");
-                log::debug!("Peer address: {}", peer);
+                log_debug!("Peer address: {}", peer);
                 tokio::spawn(accept_connection(
                     client_senders.clone(),
                     peer,
@@ -91,7 +91,7 @@ pub async fn handle_accept(
                 ));
             }
             Err(e) => {
-                log::error!("Error accepting connection: {:?}", e);
+                log_error!("Error accepting connection: {:?}", e);
             }
         }
     }
@@ -106,7 +106,7 @@ pub async fn accept_connection(
     if let Err(e) = handle_connection(client_senders, peer, stream, option).await {
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-            err => log::error!("Error processing connection: {}", err),
+            err => log_error!("Error processing connection: {}", err),
         }
     }
 }
@@ -119,7 +119,7 @@ pub async fn handle_connection(
 ) -> tungstenite::Result<()> {
     match accept_async(stream).await {
         Ok(ws_stream) => {
-            log::debug!("New WebSocket connection: {}", peer);
+            log_debug!("New WebSocket connection: {}", peer);
             let (mut ostream, mut istream) = ws_stream.split();
 
             let (sx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(1024);
@@ -163,17 +163,17 @@ pub async fn handle_connection(
                 ostream.send(message.clone()).await?;
                 let data = message.into_data();
                 if let Ok(data) = Data::deserialize(&data) {
-                    log::debug!("Server sending message: {:?}", data);
+                    log_debug!("Server sending message: {:?}", data);
                     if data.category == Category::Disconnect as u16 {
                         break;
                     }
                 }
             }
-            log::debug!("client: {} disconnected", peer);
+            log_debug!("client: {} disconnected", peer);
             ostream.flush().await?;
         }
         Err(e) => {
-            log::debug!("Error accepting WebSocket connection: {:?}", e);
+            log_debug!("Error accepting WebSocket connection: {:?}", e);
         }
     }
 
@@ -190,7 +190,7 @@ async fn get_id_from_first_message(
     if let Some(Ok(Message::Binary(value))) = istream.next().await {
         if let Ok(mut data) = Data::deserialize(&value) {
             if data.category == Category::Ping as u16 {
-                log::debug!("receive ping from client: {:?}", data);
+                log_debug!("receive ping from client: {:?}", data);
                 if let Ok(ping) = Ping::deserialize(&data.datas) {
                     _id = Some(ping.peer.into());
                     client_senders

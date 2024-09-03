@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -17,7 +17,7 @@ tokio = { version = "1.40.0", default-features = false, features = [
     "time",
     "rt-multi-thread",
 ] }
-async-trait = "0.1.81"
+async-trait = "0.1.82"
 native_db = "0.7.1"
 native_model = "0.4.19"
 tokio-tungstenite = "0.23.1"
