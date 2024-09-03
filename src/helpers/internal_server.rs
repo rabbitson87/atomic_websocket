@@ -106,7 +106,7 @@ pub async fn accept_connection(
     if let Err(e) = handle_connection(client_senders, peer, stream, option).await {
         match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-            err => println!("Error processing connection: {}", err),
+            err => log::error!("Error processing connection: {}", err),
         }
     }
 }
