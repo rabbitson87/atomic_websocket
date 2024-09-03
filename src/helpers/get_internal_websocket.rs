@@ -33,7 +33,7 @@ pub async fn wrap_get_internal_websocket(
     match get_internal_websocket(db, server_sender, server_ip, options).await {
         Ok(_) => true,
         Err(e) => {
-            println!("Error getting websocket: {:?}", e);
+            log::error!("Error getting websocket: {:?}", e);
             false
         }
     }
@@ -45,7 +45,7 @@ pub async fn get_internal_websocket(
     server_ip: String,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    dev_print!("Connecting to {}", server_ip);
+    log::debug!("Connecting to {}", server_ip);
     if let Ok((ws_stream, _)) = connect_async(&server_ip).await {
         handle_websocket(
             db,
@@ -56,7 +56,7 @@ pub async fn get_internal_websocket(
         )
         .await?;
     }
-    dev_print!("Failed to server connect to {}", server_ip);
+    log::debug!("Failed to server connect to {}", server_ip);
     Ok(())
 }
 
@@ -68,7 +68,7 @@ pub async fn handle_websocket(
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     let (mut ostream, mut istream) = ws_stream.split();
-    dev_print!("Connected to {} for web socket", server_ip);
+    log::debug!("Connected to {} for web socket", server_ip);
 
     let (sx, mut rx) = watch::channel(Message::Binary(vec![0u8]));
     let server_ip = server_ip.copy_string();
@@ -76,7 +76,7 @@ pub async fn handle_websocket(
     server_sender.add(sx, server_ip).await;
 
     if options.use_ping {
-        dev_print!("Client send message: {:?}", make_ping_message(&id));
+        log::debug!("Client send message: {:?}", make_ping_message(&id));
         server_sender.send(make_ping_message(&id)).await;
     }
 
@@ -86,7 +86,7 @@ pub async fn handle_websocket(
             if let Ok(data) = Data::deserialize(&value) {
                 let id_clone = id.copy_string();
                 let server_sender_clone = server_sender.clone();
-                dev_print!("Client receive message: {:?}", data);
+                log::debug!("Client receive message: {:?}", data);
                 if data.category == Category::Pong as u16 {
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(15)).await;
@@ -108,14 +108,14 @@ pub async fn handle_websocket(
             Ok(_) => {
                 let data = message.into_data();
                 if let Ok(data) = Data::deserialize(&data) {
-                    println!("Send message: {:?}", data);
+                    log::debug!("Send message: {:?}", data);
                     if data.category == Category::Disconnect as u16 {
                         break;
                     }
                 }
             }
             Err(e) => {
-                println!("Error sending message: {:?}", e);
+                log::error!("Error sending message: {:?}", e);
                 break;
             }
         }
@@ -123,7 +123,7 @@ pub async fn handle_websocket(
             break;
         }
     }
-    println!("WebSocket closed");
+    log::debug!("WebSocket closed");
     ostream.flush().await?;
     Ok(())
 }

@@ -43,7 +43,7 @@ impl ClientSenders {
 
     pub async fn add(&mut self, peer: String, sx: Sender<Message>) {
         let list = self.lists.iter().position(|x| x.peer == peer);
-        dev_print!("Add peer: {:?}, list: {:?}", peer, list);
+        log::debug!("Add peer: {:?}, list: {:?}", peer, list);
         match list {
             Some(index) => {
                 let list = self.lists.get_mut(index).unwrap();
@@ -82,7 +82,7 @@ impl ClientSenders {
 
     pub fn remove(&mut self, peer: String) {
         let list = self.lists.iter().position(|x| x.peer == peer);
-        dev_print!("Remove peer: {:?}, list: {:?}", peer, list);
+        log::debug!("Remove peer: {:?}, list: {:?}", peer, list);
         match list {
             Some(index) => {
                 self.lists.remove(index);
@@ -109,7 +109,7 @@ impl ClientSenders {
                                 result = false;
                                 break;
                             }
-                            dev_print!("Error client sending message: {:?}", e);
+                            log::error!("Error client sending message: {:?}", e);
                             count += 1;
                         }
                     }

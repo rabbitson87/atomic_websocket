@@ -46,7 +46,7 @@ async fn server_start(address: String) {
 pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, String)>) {
     loop {
         let message = receiver.borrow_and_update().clone();
-        println!("Message: {:?}", message);
+        log::debug!("Message: {:?}", message);
         if receiver.changed().await.is_err() {
             break;
         }
@@ -57,7 +57,7 @@ async fn outer_client_start() {
     let current_path = match get_db_path() {
         Ok(path) => path,
         Err(error) => {
-            println!("Failed to get db path {error:?}");
+            log::error!("Failed to get db path {error:?}");
             return;
         }
     };
@@ -82,7 +82,7 @@ async fn internal_client_start(port: &str) {
     let current_path = match get_db_path() {
         Ok(path) => path,
         Err(error) => {
-            println!("Failed to get db path {error:?}");
+            log::error!("Failed to get db path {error:?}");
             return;
         }
     };
@@ -117,9 +117,9 @@ async fn internal_client_start(port: &str) {
 pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
     loop {
         let status = receiver.borrow_and_update().clone();
-        println!("Status: {:?}", status);
+        log::debug!("Status: {:?}", status);
         if status == SenderStatus::Disconnected {
-            println!("Disconnected");
+            log::debug!("Disconnected");
         }
         if receiver.changed().await.is_err() {
             break;
@@ -130,7 +130,7 @@ pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
 pub async fn receive_handle_message(mut receiver: Receiver<Vec<u8>>) {
     loop {
         let message = receiver.borrow_and_update().clone();
-        println!("Message: {:?}", message);
+        log::debug!("Message: {:?}", message);
         if receiver.changed().await.is_err() {
             break;
         }
@@ -148,7 +148,7 @@ pub fn make_models() -> &'static Models {
     BUILDER.get_or_init(|| {
         let mut models = Models::new();
         if let Err(_) = models.define::<Settings>() {
-            println!("Failed to define ClientTable");
+            log::error!("Failed to define ClientTable");
         };
         models
     })

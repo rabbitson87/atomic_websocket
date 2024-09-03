@@ -103,7 +103,7 @@ impl ServerSender {
                     self.server_send_times = now().timestamp();
                 }
                 Err(e) => {
-                    dev_print!("Error server sending message: {:?}", e);
+                    log::error!("Error server sending message: {:?}", e);
                     self.send_status(SenderStatus::Disconnected).await;
 
                     let mut send_result = false;
@@ -125,7 +125,7 @@ impl ServerSender {
                                     ));
                                     break;
                                 }
-                                dev_print!("Error server sending message: {:?}", e);
+                                log::error!("Error server sending message: {:?}", e);
                                 count += 1;
                             }
                         };
@@ -155,7 +155,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         let mut clone = self.write().await;
         clone.add(sx, server_ip.copy_string());
 
-        dev_print!("set start server_ip: {:?}", server_ip);
+        log::debug!("set start server_ip: {:?}", server_ip);
         let server_connect_info = match get_setting_by_key(
             clone.db.clone(),
             format!("{:?}", SaveKey::ServerConnectInfo),
@@ -164,7 +164,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         {
             Ok(server_connect_info) => server_connect_info,
             Err(error) => {
-                dev_print!("Failed to get server_connect_info {error:?}");
+                log::debug!("Failed to get server_connect_info {error:?}");
                 None
             }
         };
