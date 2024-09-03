@@ -35,6 +35,8 @@ pub async fn get_outer_websocket(
     server_sender: Arc<RwLock<ServerSender>>,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
+    use crate::log_debug;
+
     let connector = TlsConnector::new().expect("Failed to create TLS connector");
     let connector = Connector::NativeTls(connector);
 

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.5
+
+* Fixed for native_tls logger.
+
 ## 0.2.4
 
 * Change for logging system. Thank for Jake Kwak!
