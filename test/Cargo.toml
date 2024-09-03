@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.40.0", default-features = false, features = ["fs"] }
 atomic_websocket = { path = "../", features = ["debug"] }
+log = "0.4.22"
 
 [profile.dev]
 opt-level = 0

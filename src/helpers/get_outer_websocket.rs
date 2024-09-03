@@ -25,7 +25,7 @@ pub async fn wrap_get_outer_websocket(
     match get_outer_websocket(db, server_sender, options).await {
         Ok(_) => (),
         Err(e) => {
-            dev_print!("Error getting websocket: {:?}", e);
+            log::error!("Error getting websocket: {:?}", e);
         }
     }
 }
@@ -40,7 +40,7 @@ pub async fn get_outer_websocket(
     let connector = Connector::NativeTls(connector);
 
     let url = format!("wss://{}", &options.url);
-    dev_print!("Connecting to WebSocket server: {:?}", &url);
+    log::debug!("Connecting to WebSocket server: {:?}", &url);
     if let Ok((ws_stream, _)) =
         connect_async_tls_with_config(&url, None, false, Some(connector)).await
     {
@@ -57,7 +57,7 @@ pub async fn get_outer_websocket(
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     let url = format!("ws://{}", &options.url);
-    dev_print!("Connecting to WebSocket server: {:?}", &url);
+    log::debug!("Connecting to WebSocket server: {:?}", &url);
     if let Ok((ws_stream, _)) = connect_async(&url).await {
         handle_websocket(db, server_sender, options, url.copy_string(), ws_stream).await?;
     }
