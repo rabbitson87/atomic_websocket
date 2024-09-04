@@ -17,7 +17,7 @@ use crate::{log_debug, log_error, Settings};
 use bebop::Record;
 use native_db::Database;
 
-use tokio::sync::watch::Receiver;
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]

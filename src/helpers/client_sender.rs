@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bebop::{Record, SliceWrapper};
+use bebop::Record;
 use tokio::{
-    sync::{mpsc::Sender, watch, RwLock},
+    sync::{broadcast, mpsc::Sender, RwLock},
     time::sleep,
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -21,20 +21,12 @@ use super::common::make_expired_output_message;
 
 pub struct ClientSenders {
     lists: Vec<ClientSender>,
-    handle_message_sx: watch::Sender<(Vec<u8>, String)>,
+    handle_message_sx: broadcast::Sender<(Vec<u8>, String)>,
 }
 
 impl ClientSenders {
     pub fn new() -> Self {
-        let data = vec![0_u8];
-        let mut buf = vec![];
-        Data {
-            category: 65535,
-            datas: SliceWrapper::from_raw(&data),
-        }
-        .serialize(&mut buf)
-        .unwrap();
-        let (handle_message_sx, _) = watch::channel((buf, "".into()));
+        let (handle_message_sx, _) = broadcast::channel(32);
         Self {
             lists: Vec::new(),
             handle_message_sx,
@@ -58,7 +50,7 @@ impl ClientSenders {
         };
     }
 
-    pub fn get_handle_message_receiver(&self) -> watch::Receiver<(Vec<u8>, String)> {
+    pub fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)> {
         self.handle_message_sx.subscribe()
     }
 
@@ -124,7 +116,7 @@ impl ClientSenders {
 #[async_trait]
 pub trait ClientSendersTrait {
     async fn add(&self, peer: String, sx: Sender<Message>);
-    async fn get_handle_message_receiver(&self) -> watch::Receiver<(Vec<u8>, String)>;
+    async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)>;
     fn send_handle_message(&self, data: Data<'_>, peer: String);
     async fn send(&self, peer: String, message: Message);
     async fn expire_send(&self, peer_list: Vec<String>);
@@ -138,7 +130,7 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
         drop(clone);
     }
 
-    async fn get_handle_message_receiver(&self) -> watch::Receiver<(Vec<u8>, String)> {
+    async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)> {
         let clone = self.read().await;
         clone.get_handle_message_receiver()
     }

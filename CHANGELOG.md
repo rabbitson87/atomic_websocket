@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.0
+
+* Change for watch receiver to broadcast receiver! 
+
 ## 0.2.7
 
 * Fixed for client when received pong with connectState.

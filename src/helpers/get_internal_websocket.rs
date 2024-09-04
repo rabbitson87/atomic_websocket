@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use bebop::{Record, SliceWrapper};
+use bebop::Record;
 use futures_util::{SinkExt, StreamExt};
 use native_db::Database;
 use std::time::Duration;
 use tokio::{
     net::TcpStream,
-    sync::{watch, RwLock},
+    sync::{broadcast, RwLock},
     time::sleep,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -69,15 +69,7 @@ pub async fn handle_websocket(
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
-    let data = vec![0_u8];
-    let mut buf = vec![];
-    Data {
-        category: 65535,
-        datas: SliceWrapper::from_raw(&data),
-    }
-    .serialize(&mut buf)
-    .unwrap();
-    let (sx, mut rx) = watch::channel(Message::Binary(buf));
+    let (sx, mut rx) = broadcast::channel(1024);
     let server_ip = server_ip.copy_string();
     let id = get_id(db.clone()).await;
     server_sender.add(sx, server_ip).await;
@@ -112,16 +104,11 @@ pub async fn handle_websocket(
         }
     });
 
-    loop {
-        let message = rx.borrow_and_update().clone();
-
+    while let Ok(message) = rx.recv().await {
         match ostream.send(message.clone()).await {
             Ok(_) => {
                 let data = message.into_data();
                 if let Ok(data) = Data::deserialize(&data) {
-                    if data.category == 65535 {
-                        continue;
-                    }
                     log_debug!("Send message: {:?}", data);
                     if data.category == Category::Disconnect as u16 {
                         break;
@@ -132,9 +119,6 @@ pub async fn handle_websocket(
                 log_error!("Error sending message: {:?}", e);
                 break;
             }
-        }
-        if rx.changed().await.is_err() {
-            break;
         }
     }
     log_debug!("WebSocket closed");

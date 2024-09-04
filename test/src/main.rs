@@ -8,16 +8,13 @@ use std::{
 
 use atomic_websocket::{
     client_sender::ServerOptions,
-    external::{
-        native_db::{Builder, Database, Models},
-        tokio_tungstenite::tungstenite::client,
-    },
+    external::native_db::{Builder, Database, Models},
     schema::ServerConnectInfo,
-    server_sender::{ClientOptions, SenderStatus, ServerSender, ServerSenderTrait},
+    server_sender::{ClientOptions, SenderStatus},
     AtomicWebsocket, Settings,
 };
 use tokio::{
-    sync::{watch::Receiver, RwLock},
+    sync::{broadcast::Receiver, RwLock},
     time::sleep,
 };
 
@@ -50,12 +47,8 @@ async fn server_start(address: String) {
 }
 
 pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, String)>) {
-    loop {
-        let message = receiver.borrow_and_update().clone();
+    while let Ok(message) = receiver.recv().await {
         log::debug!("Message: {:?}", message);
-        if receiver.changed().await.is_err() {
-            break;
-        }
     }
 }
 
@@ -120,8 +113,7 @@ async fn internal_client_start(port: &str) {
 }
 
 pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
-    loop {
-        let status = receiver.borrow_and_update().clone();
+    while let Ok(status) = receiver.recv().await {
         log::debug!("Status: {:?}", status);
         if status == SenderStatus::Disconnected {
             log::debug!("Disconnected");
@@ -129,19 +121,12 @@ pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
         if status == SenderStatus::Connected {
             log::debug!("Connected");
         }
-        if receiver.changed().await.is_err() {
-            break;
-        }
     }
 }
 
 pub async fn receive_handle_message(mut receiver: Receiver<Vec<u8>>) {
-    loop {
-        let message = receiver.borrow_and_update().clone();
+    while let Ok(message) = receiver.recv().await {
         log::debug!("Message: {:?}", message);
-        if receiver.changed().await.is_err() {
-            break;
-        }
     }
 }
 
