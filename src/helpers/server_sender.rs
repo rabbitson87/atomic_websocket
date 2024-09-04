@@ -107,6 +107,13 @@ impl ServerSender {
 
                     let mut send_result = false;
                     let mut count = 0;
+                    let limit_count = match self.options.retry_seconds > 5 {
+                        true => 5,
+                        false => match self.options.retry_seconds {
+                            0 => 0,
+                            _ => self.options.retry_seconds - 1,
+                        },
+                    };
                     while send_result == false {
                         sleep(Duration::from_secs(1)).await;
                         match sender.send(message.clone()) {
@@ -115,7 +122,7 @@ impl ServerSender {
                                 self.server_send_times = now().timestamp();
                             }
                             Err(e) => {
-                                if count > 5 {
+                                if count > limit_count {
                                     tokio::spawn(wrap_get_internal_websocket(
                                         self.db.clone(),
                                         self.server_sender.as_ref().unwrap().clone(),

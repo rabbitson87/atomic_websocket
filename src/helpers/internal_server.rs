@@ -18,7 +18,7 @@ use crate::{
 };
 use bebop::Record;
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Sender};
 use tokio_tungstenite::{
     accept_async,
     tungstenite::{self, Message},
@@ -122,7 +122,7 @@ pub async fn handle_connection(
             log_debug!("New WebSocket connection: {}", peer);
             let (mut ostream, mut istream) = ws_stream.split();
 
-            let (sx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(1024);
+            let (sx, mut rx) = mpsc::channel(1024);
             tokio::spawn(async move {
                 let use_ping = option.use_ping;
                 let id = get_id_from_first_message(

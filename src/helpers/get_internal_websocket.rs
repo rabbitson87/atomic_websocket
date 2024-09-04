@@ -115,6 +115,9 @@ pub async fn handle_websocket(
             Ok(_) => {
                 let data = message.into_data();
                 if let Ok(data) = Data::deserialize(&data) {
+                    if data.category == 65535 {
+                        continue;
+                    }
                     log_debug!("Send message: {:?}", data);
                     if data.category == Category::Disconnect as u16 {
                         break;

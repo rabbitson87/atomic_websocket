@@ -24,6 +24,7 @@ use tokio::sync::RwLock;
 pub struct ClientOptions {
     pub use_ping: bool,
     pub url: String,
+    pub retry_seconds: u64,
     #[cfg(feature = "native_tls")]
     pub use_tls: bool,
 }
@@ -33,6 +34,7 @@ impl Default for ClientOptions {
         Self {
             use_ping: true,
             url: "".into(),
+            retry_seconds: 30,
             #[cfg(feature = "native_tls")]
             use_tls: true,
         }
@@ -117,10 +119,11 @@ async fn internal_ping_loop_cheker(
     server_sender: Arc<RwLock<ServerSender>>,
     options: ClientOptions,
 ) {
+    let retry_seconds = options.retry_seconds;
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
         let mut server_sender_clone = server_sender.write().await;
-        if server_sender_clone.server_send_times + 90 < now().timestamp()
+        if server_sender_clone.server_send_times + (retry_seconds as i64 * 3) < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
             server_sender_clone.change_ip("".into());
@@ -169,7 +172,8 @@ async fn internal_ping_loop_cheker(
                 let _ = get_internal_connect(None, db, server_sender_clone2, options_clone).await;
                 true
             });
-        } else if server_sender_clone.server_send_times + 30 < now().timestamp() {
+        } else if server_sender_clone.server_send_times + (retry_seconds as i64) < now().timestamp()
+        {
             log_debug!(
                 "send: {:?}, current: {:?}",
                 server_sender_clone.server_send_times,
