@@ -1,5 +1,9 @@
 # Changes
 
+## 0.2.7
+
+* Fixed for client when received pong with connectState.
+
 ## 0.2.6
 
 * Add retry_seconds option for client.(default: 30 seconds)

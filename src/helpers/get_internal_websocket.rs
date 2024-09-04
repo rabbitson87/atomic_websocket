@@ -87,7 +87,7 @@ pub async fn handle_websocket(
         server_sender.send(make_ping_message(&id)).await;
     }
 
-    server_sender.send_status(SenderStatus::Connected);
+    let mut is_first = true;
     tokio::spawn(async move {
         while let Some(Ok(Message::Binary(value))) = istream.next().await {
             if let Ok(data) = Data::deserialize(&value) {
@@ -95,6 +95,10 @@ pub async fn handle_websocket(
                 let server_sender_clone = server_sender.clone();
                 log_debug!("Client receive message: {:?}", data);
                 if data.category == Category::Pong as u16 {
+                    if is_first {
+                        is_first = false;
+                        server_sender.send_status(SenderStatus::Connected);
+                    }
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(15)).await;
                         server_sender_clone.send(make_ping_message(&id_clone)).await;
