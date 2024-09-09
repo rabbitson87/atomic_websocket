@@ -25,6 +25,7 @@ pub struct ClientOptions {
     pub use_ping: bool,
     pub url: String,
     pub retry_seconds: u64,
+    pub use_keep_ip: bool,
     #[cfg(feature = "native_tls")]
     pub use_tls: bool,
 }
@@ -35,6 +36,7 @@ impl Default for ClientOptions {
             use_ping: true,
             url: "".into(),
             retry_seconds: 30,
+            use_keep_ip: false,
             #[cfg(feature = "native_tls")]
             use_tls: true,
         }
@@ -120,48 +122,52 @@ async fn internal_ping_loop_cheker(
     options: ClientOptions,
 ) {
     let retry_seconds = options.retry_seconds;
+    let use_keep_ip = options.use_keep_ip;
     loop {
         tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
         let mut server_sender_clone = server_sender.write().await;
         if server_sender_clone.server_send_times + (retry_seconds as i64 * 3) < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
-            server_sender_clone.change_ip("".into());
-
             server_sender.send_status(SenderStatus::Disconnected);
+            if !use_keep_ip {
+                server_sender_clone.change_ip("".into());
 
-            let server_connect_info = match get_setting_by_key(
-                server_sender_clone.db.clone(),
-                format!("{:?}", SaveKey::ServerConnectInfo),
-            )
-            .await
-            {
-                Ok(server_connect_info) => server_connect_info,
-                Err(error) => {
-                    log_error!("Failed to get server_connect_info {error:?}");
-                    None
+                let server_connect_info = match get_setting_by_key(
+                    server_sender_clone.db.clone(),
+                    format!("{:?}", SaveKey::ServerConnectInfo),
+                )
+                .await
+                {
+                    Ok(server_connect_info) => server_connect_info,
+                    Err(error) => {
+                        log_error!("Failed to get server_connect_info {error:?}");
+                        None
+                    }
+                };
+                if let Some(server_connect_info) = server_connect_info {
+                    let mut info =
+                        ServerConnectInfo::deserialize(&server_connect_info.value).unwrap();
+                    info.server_ip = "".into();
+                    let mut value = Vec::new();
+                    info.serialize(&mut value).unwrap();
+                    let db = server_sender_clone.db.read().await;
+                    let writer = db.rw_transaction().unwrap();
+                    writer
+                        .update::<Settings>(
+                            server_connect_info,
+                            Settings {
+                                key: format!("{:?}", SaveKey::ServerConnectInfo),
+                                value,
+                            },
+                        )
+                        .unwrap();
+                    writer.commit().unwrap();
+                    drop(db);
                 }
-            };
-            if let Some(server_connect_info) = server_connect_info {
-                let mut info = ServerConnectInfo::deserialize(&server_connect_info.value).unwrap();
-                info.server_ip = "".into();
-                let mut value = Vec::new();
-                info.serialize(&mut value).unwrap();
-                let db = server_sender_clone.db.read().await;
-                let writer = db.rw_transaction().unwrap();
-                writer
-                    .update::<Settings>(
-                        server_connect_info,
-                        Settings {
-                            key: format!("{:?}", SaveKey::ServerConnectInfo),
-                            value,
-                        },
-                    )
-                    .unwrap();
-                writer.commit().unwrap();
-                drop(db);
+                drop(server_sender_clone);
             }
-            drop(server_sender_clone);
+
             let server_sender_clone = server_sender.clone();
             let server_sender_clone2 = server_sender.clone();
             let options_clone = options.clone();
@@ -189,15 +195,18 @@ async fn internal_ping_loop_cheker(
 }
 
 async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, options: ClientOptions) {
+    let use_keep_ip = options.use_keep_ip;
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
         let mut server_sender_clone = server_sender.write().await;
         if server_sender_clone.server_send_times + 90 < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
-            server_sender_clone.change_ip("".into());
-
             server_sender.send_status(SenderStatus::Disconnected);
+
+            if !use_keep_ip {
+                server_sender_clone.change_ip("".into());
+            }
 
             let server_sender_clone = server_sender.clone();
             let server_sender_clone2 = server_sender.clone();

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.1
+
+* Add use_keep_ip option for client.
+
 ## 0.3.0
 
 * Change for watch receiver to broadcast receiver! 

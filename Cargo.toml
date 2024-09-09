@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -27,7 +27,7 @@ log = "0.4.22"
 
 bebop = "3.0.14"
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
-serde = { version = "1.0.209", features = ["derive"] }
+serde = { version = "1.0.210", features = ["derive"] }
 native-tls = { version = "0.2.12", optional = true }
 
 [workspace]
