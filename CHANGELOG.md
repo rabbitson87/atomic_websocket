@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.4
+
+* Fixed for client loopChecker when deadlock.
+
 ## 0.3.3
 
 * Fixed for client loopChecker when read and write.

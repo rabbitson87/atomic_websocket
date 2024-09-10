@@ -131,8 +131,7 @@ async fn internal_ping_loop_cheker(
         {
             server_sender.send_status(SenderStatus::Disconnected);
             if !use_keep_ip {
-                server_sender.clone().write().await.change_ip("".into());
-
+                server_sender.change_ip("".into()).await;
                 let server_connect_info = match get_setting_by_key(
                     server_sender_clone.db.clone(),
                     format!("{:?}", SaveKey::ServerConnectInfo),
@@ -187,7 +186,7 @@ async fn internal_ping_loop_cheker(
             );
             log_debug!("Try ping from loop checker");
             let id: String = get_id(server_sender_clone.db.clone()).await;
-            server_sender.clone().send(make_ping_message(&id)).await;
+            server_sender.send(make_ping_message(&id)).await;
             drop(server_sender_clone);
         }
         log_debug!("loop server checker finish");
@@ -205,7 +204,7 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             server_sender.send_status(SenderStatus::Disconnected);
 
             if !use_keep_ip {
-                server_sender.clone().write().await.change_ip("".into());
+                server_sender.change_ip("".into()).await;
             }
 
             let server_sender_clone = server_sender.clone();
@@ -226,7 +225,7 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             );
             log_debug!("Try ping from loop checker");
             let id: String = get_id(server_sender_clone.db.clone()).await;
-            server_sender.clone().send(make_ping_message(&id)).await;
+            server_sender.send(make_ping_message(&id)).await;
             drop(server_sender_clone);
         }
         log_debug!("loop server checker finish");
@@ -247,11 +246,7 @@ pub async fn get_outer_connect(
     log_debug!("server_connect_info: {:?}", server_connect_info);
 
     if !options.url.is_empty() {
-        server_sender
-            .clone()
-            .write()
-            .await
-            .change_ip(options.url.clone());
+        server_sender.change_ip(options.url.clone()).await;
     }
 
     if options.url.is_empty() && !server_sender.is_valid_server_ip().await {

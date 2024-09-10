@@ -145,6 +145,7 @@ pub trait ServerSenderTrait {
     async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>);
     async fn is_valid_server_ip(&self) -> bool;
     async fn get_server_ip(&self) -> String;
+    async fn change_ip(&self, server_ip: String);
 }
 
 #[async_trait]
@@ -257,5 +258,11 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
             .nth(0)
             .unwrap()
             .into()
+    }
+
+    async fn change_ip(&self, server_ip: String) {
+        let mut clone = self.write().await;
+        clone.change_ip(server_ip);
+        drop(clone);
     }
 }
