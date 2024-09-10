@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.3
+
+* Fixed for client loopChecker when read and write.
+
 ## 0.3.2
 
 * Add condition for is_valid_server_ip(calculate server_send_times).

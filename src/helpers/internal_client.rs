@@ -125,13 +125,13 @@ async fn internal_ping_loop_cheker(
     let use_keep_ip = options.use_keep_ip;
     loop {
         tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
-        let mut server_sender_clone = server_sender.write().await;
+        let server_sender_clone = server_sender.read().await;
         if server_sender_clone.server_send_times + (retry_seconds as i64 * 3) < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
             server_sender.send_status(SenderStatus::Disconnected);
             if !use_keep_ip {
-                server_sender_clone.change_ip("".into());
+                server_sender.clone().write().await.change_ip("".into());
 
                 let server_connect_info = match get_setting_by_key(
                     server_sender_clone.db.clone(),
@@ -187,7 +187,7 @@ async fn internal_ping_loop_cheker(
             );
             log_debug!("Try ping from loop checker");
             let id: String = get_id(server_sender_clone.db.clone()).await;
-            server_sender_clone.send(make_ping_message(&id)).await;
+            server_sender.clone().send(make_ping_message(&id)).await;
             drop(server_sender_clone);
         }
         log_debug!("loop server checker finish");
@@ -198,14 +198,14 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
     let use_keep_ip = options.use_keep_ip;
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
-        let mut server_sender_clone = server_sender.write().await;
+        let server_sender_clone = server_sender.read().await;
         if server_sender_clone.server_send_times + 90 < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
             server_sender.send_status(SenderStatus::Disconnected);
 
             if !use_keep_ip {
-                server_sender_clone.change_ip("".into());
+                server_sender.clone().write().await.change_ip("".into());
             }
 
             let server_sender_clone = server_sender.clone();
@@ -226,7 +226,7 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             );
             log_debug!("Try ping from loop checker");
             let id: String = get_id(server_sender_clone.db.clone()).await;
-            server_sender_clone.send(make_ping_message(&id)).await;
+            server_sender.clone().send(make_ping_message(&id)).await;
             drop(server_sender_clone);
         }
         log_debug!("loop server checker finish");
