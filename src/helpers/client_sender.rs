@@ -26,7 +26,7 @@ pub struct ClientSenders {
 
 impl ClientSenders {
     pub fn new() -> Self {
-        let (handle_message_sx, _) = broadcast::channel(32);
+        let (handle_message_sx, _) = broadcast::channel(4);
         Self {
             lists: Vec::new(),
             handle_message_sx,
@@ -54,7 +54,7 @@ impl ClientSenders {
         self.handle_message_sx.subscribe()
     }
 
-    pub async fn send_handle_message(&self, data: Vec<u8>, peer: String) {
+    pub fn send_handle_message(&self, data: Vec<u8>, peer: String) {
         let handle_message_sx = self.handle_message_sx.clone();
         let _ = handle_message_sx.send((data, peer));
     }
@@ -141,7 +141,7 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
         tokio::spawn(async move {
-            let _ = clone.write().await.send_handle_message(buf, peer).await;
+            let _ = clone.write().await.send_handle_message(buf, peer);
             drop(clone);
         });
     }

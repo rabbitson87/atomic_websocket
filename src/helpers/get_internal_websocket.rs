@@ -6,7 +6,7 @@ use native_db::Database;
 use std::time::Duration;
 use tokio::{
     net::TcpStream,
-    sync::{broadcast, RwLock},
+    sync::{mpsc, RwLock},
     time::sleep,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -69,10 +69,10 @@ pub async fn handle_websocket(
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
-    let (sx, mut rx) = broadcast::channel(1024);
+    let (sx, mut rx) = mpsc::channel(8);
     let server_ip = server_ip.copy_string();
     let id = get_id(db.clone()).await;
-    server_sender.add(sx, server_ip).await;
+    server_sender.add(sx.clone(), server_ip).await;
 
     if options.use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
@@ -84,19 +84,19 @@ pub async fn handle_websocket(
         while let Some(Ok(Message::Binary(value))) = istream.next().await {
             if let Ok(data) = Data::deserialize(&value) {
                 let id_clone = id.copy_string();
-                let server_sender_clone = server_sender.clone();
                 log_debug!("Client receive message: {:?}", data);
                 if data.category == Category::Pong as u16 {
                     if is_first {
                         is_first = false;
                         server_sender.send_status(SenderStatus::Connected);
                     }
+                    let server_sender_clone = server_sender.clone();
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(15)).await;
                         server_sender_clone.send(make_ping_message(&id_clone)).await;
                     });
-                }
-                if data.category == Category::Disconnect as u16 {
+                    continue;
+                } else if data.category == Category::Disconnect as u16 {
                     break;
                 }
                 server_sender.send_handle_message(data);
@@ -104,7 +104,7 @@ pub async fn handle_websocket(
         }
     });
 
-    while let Ok(message) = rx.recv().await {
+    while let Some(message) = rx.recv().await {
         match ostream.send(message.clone()).await {
             Ok(_) => {
                 let data = message.into_data();

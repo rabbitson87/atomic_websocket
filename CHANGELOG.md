@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.5
+
+* Fixed for client loopChecker when send message locking.
+
 ## 0.3.4
 
 * Fixed for client loopChecker when deadlock.

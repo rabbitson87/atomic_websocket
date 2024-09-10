@@ -6,7 +6,7 @@ use native_db::Database;
 use tokio::{
     sync::{
         broadcast::{self, Receiver, Sender},
-        RwLock,
+        mpsc, RwLock,
     },
     time::sleep,
 };
@@ -33,7 +33,7 @@ pub enum SenderStatus {
 }
 
 pub struct ServerSender {
-    sx: Option<Sender<Message>>,
+    sx: Option<mpsc::Sender<Message>>,
     pub db: Arc<RwLock<Database<'static>>>,
     pub server_sender: Option<Arc<RwLock<ServerSender>>>,
     pub server_ip: String,
@@ -49,8 +49,8 @@ impl ServerSender {
         server_ip: String,
         options: ClientOptions,
     ) -> Self {
-        let (status_sx, _) = broadcast::channel(32);
-        let (handle_message_sx, _) = broadcast::channel(32);
+        let (status_sx, _) = broadcast::channel(4);
+        let (handle_message_sx, _) = broadcast::channel(4);
         Self {
             sx: None,
             db,
@@ -71,44 +71,44 @@ impl ServerSender {
     pub fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
         self.server_sender = Some(server_sender);
     }
-    pub fn add(&mut self, sx: Sender<Message>, server_ip: String) {
+    pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: String) {
         self.sx = Some(sx);
         self.server_ip = server_ip;
     }
     pub fn change_ip(&mut self, server_ip: String) {
         self.server_ip = server_ip;
     }
-    pub async fn send_status(&self, status: SenderStatus) {
+    pub fn send_status(&self, status: SenderStatus) {
         let status_sx = self.status_sx.clone();
         let _ = status_sx.send(status);
     }
-    pub async fn send_handle_message(&self, data: Vec<u8>) {
+    pub fn send_handle_message(&self, data: Vec<u8>) {
         let handle_message_sx = self.handle_message_sx.clone();
         let _ = handle_message_sx.send(data);
     }
     pub async fn send(&mut self, message: Message) {
         if let Some(sx) = &self.sx {
             let sender = sx.clone();
-            match sender.send(message.clone()) {
+            match sender.send(message.clone()).await {
                 Ok(_) => {
                     self.server_send_times = now().timestamp();
                 }
                 Err(e) => {
                     log_error!("Error server sending message: {:?}", e);
-                    self.send_status(SenderStatus::Disconnected).await;
+                    self.send_status(SenderStatus::Disconnected);
 
                     let mut send_result = false;
                     let mut count = 0;
                     let limit_count = match self.options.retry_seconds > 5 {
                         true => 5,
                         false => match self.options.retry_seconds {
-                            0 => 0,
+                            0 | 1 => 1,
                             _ => self.options.retry_seconds - 1,
                         },
                     };
                     while send_result == false {
                         sleep(Duration::from_secs(1)).await;
-                        match sender.send(message.clone()) {
+                        match sender.send(message.clone()).await {
                             Ok(_) => {
                                 send_result = true;
                                 self.server_send_times = now().timestamp();
@@ -136,7 +136,7 @@ impl ServerSender {
 
 #[async_trait]
 pub trait ServerSenderTrait {
-    async fn add(&self, sx: Sender<Message>, server_ip: String);
+    async fn add(&self, sx: mpsc::Sender<Message>, server_ip: String);
     fn send_status(&self, status: SenderStatus);
     fn send_handle_message(&self, data: Data<'_>);
     async fn get_status_receiver(&self) -> Receiver<SenderStatus>;
@@ -150,7 +150,7 @@ pub trait ServerSenderTrait {
 
 #[async_trait]
 impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
-    async fn add(&self, sx: Sender<Message>, server_ip: String) {
+    async fn add(&self, sx: mpsc::Sender<Message>, server_ip: String) {
         let mut clone = self.write().await;
         clone.add(sx, server_ip.copy_string());
 
@@ -212,7 +212,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
     fn send_status(&self, status: SenderStatus) {
         let clone = self.clone();
         tokio::spawn(async move {
-            clone.read().await.send_status(status).await;
+            clone.read().await.send_status(status);
         });
     }
 
@@ -222,7 +222,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
         tokio::spawn(async move {
-            let _ = clone.write().await.send_handle_message(buf).await;
+            let _ = clone.write().await.send_handle_message(buf);
         });
     }
 
