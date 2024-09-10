@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.2
+
+* Add condition for is_valid_server_ip(calculate server_send_times).
+
 ## 0.3.1
 
 * Add use_keep_ip option for client.

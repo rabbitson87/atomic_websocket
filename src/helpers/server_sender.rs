@@ -239,7 +239,8 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
 
     async fn is_valid_server_ip(&self) -> bool {
         let clone = self.read().await;
-        let result = !clone.server_ip.is_empty();
+        let result = !clone.server_ip.is_empty()
+            && clone.server_send_times + clone.options.retry_seconds as i64 > now().timestamp();
         drop(clone);
         result
     }
