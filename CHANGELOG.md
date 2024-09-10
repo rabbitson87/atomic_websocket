@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.6
+
+* Add for client ping delay using retry_seconds option.
+
 ## 0.3.5
 
 * Fixed for client loopChecker when send message locking.

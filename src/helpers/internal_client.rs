@@ -118,13 +118,12 @@ impl AtomicClient {
 }
 
 async fn internal_ping_loop_cheker(
-    server_sender_original: Arc<RwLock<ServerSender>>,
+    server_sender: Arc<RwLock<ServerSender>>,
     options: ClientOptions,
 ) {
     let retry_seconds = options.retry_seconds;
     let use_keep_ip = options.use_keep_ip;
     loop {
-        let server_sender = server_sender_original.clone();
         tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
         let server_sender_clone = server_sender.read().await;
         if server_sender_clone.server_send_times > 0
@@ -183,7 +182,8 @@ async fn internal_ping_loop_cheker(
                 let _ = get_internal_connect(None, db, server_sender_clone2, options_clone).await;
                 true
             });
-        } else if server_sender_clone.server_send_times + (retry_seconds as i64) < now().timestamp()
+        } else if server_sender_clone.server_send_times + (retry_seconds as i64 * 2)
+            < now().timestamp()
         {
             log_debug!(
                 "send: {:?}, current: {:?}",

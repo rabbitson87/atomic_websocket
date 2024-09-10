@@ -122,7 +122,7 @@ pub async fn handle_connection(
             log_debug!("New WebSocket connection: {}", peer);
             let (mut ostream, mut istream) = ws_stream.split();
 
-            let (sx, mut rx) = mpsc::channel(1024);
+            let (sx, mut rx) = mpsc::channel(8);
             tokio::spawn(async move {
                 let use_ping = option.use_ping;
                 let id = get_id_from_first_message(

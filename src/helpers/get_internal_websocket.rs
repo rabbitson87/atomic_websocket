@@ -79,6 +79,7 @@ pub async fn handle_websocket(
         server_sender.send(make_ping_message(&id)).await;
     }
 
+    let retry_seconds = options.retry_seconds;
     let mut is_first = true;
     tokio::spawn(async move {
         while let Some(Ok(Message::Binary(value))) = istream.next().await {
@@ -92,7 +93,7 @@ pub async fn handle_websocket(
                     }
                     let server_sender_clone = server_sender.clone();
                     tokio::spawn(async move {
-                        sleep(Duration::from_secs(15)).await;
+                        sleep(Duration::from_secs(retry_seconds)).await;
                         server_sender_clone.send(make_ping_message(&id_clone)).await;
                     });
                     continue;
