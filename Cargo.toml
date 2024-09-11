@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.3.6"
+version = "0.3.7"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -31,7 +31,7 @@ serde = { version = "1.0.210", features = ["derive"] }
 native-tls = { version = "0.2.12", optional = true }
 
 [workspace]
-members = ["make_bebop", "test"]
+members = ["make_bebop", "test_server", "test_client"]
 
 [features]
 default = []

@@ -137,6 +137,7 @@ async fn internal_ping_loop_cheker(
                 server_sender.change_ip("".into()).await;
                 let server_sender_clone = server_sender.read().await;
                 let db = server_sender_clone.db.clone();
+                drop(server_sender_clone);
                 let server_connect_info = match get_setting_by_key(
                     db.clone(),
                     format!("{:?}", SaveKey::ServerConnectInfo),
@@ -167,19 +168,17 @@ async fn internal_ping_loop_cheker(
                         )
                         .unwrap();
                     writer.commit().unwrap();
-                    drop(db);
                 }
-                drop(server_sender_clone);
+                drop(db);
             }
 
             let server_sender_clone = server_sender.clone();
-            let server_sender_clone2 = server_sender.clone();
             let options_clone = options.clone();
             tokio::spawn(async move {
-                let server_sender_clone = server_sender_clone.read().await;
-                let db = server_sender_clone.db.clone();
-                drop(server_sender_clone);
-                let _ = get_internal_connect(None, db, server_sender_clone2, options_clone).await;
+                let server_sender_clone2 = server_sender_clone.read().await;
+                let db = server_sender_clone2.db.clone();
+                drop(server_sender_clone2);
+                let _ = get_internal_connect(None, db, server_sender_clone, options_clone).await;
                 true
             });
         } else if server_sender_clone.server_send_times + (retry_seconds as i64 * 2)
@@ -215,13 +214,12 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             }
 
             let server_sender_clone = server_sender.clone();
-            let server_sender_clone2 = server_sender.clone();
             let options_clone = options.clone();
             tokio::spawn(async move {
-                let server_sender_clone = server_sender_clone.read().await;
-                let db = server_sender_clone.db.clone();
-                drop(server_sender_clone);
-                let _ = get_outer_connect(db, server_sender_clone2, options_clone).await;
+                let server_sender_clone2 = server_sender_clone.read().await;
+                let db = server_sender_clone2.db.clone();
+                drop(server_sender_clone2);
+                let _ = get_outer_connect(db, server_sender_clone, options_clone).await;
                 true
             });
         } else if server_sender_clone.server_send_times + 30 < now().timestamp() {

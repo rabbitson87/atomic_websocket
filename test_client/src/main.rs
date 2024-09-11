@@ -7,7 +7,6 @@ use std::{
 };
 
 use atomic_websocket::{
-    client_sender::ServerOptions,
     external::native_db::{Builder, Database, Models},
     schema::ServerConnectInfo,
     server_sender::{ClientOptions, SenderStatus},
@@ -25,30 +24,12 @@ async fn main() {
     log4rs::init_raw_config(config).unwrap();
 
     let port = "9000";
-    let address: String = format!("0.0.0.0:{}", port);
-
-    tokio::spawn(server_start(address.clone()));
     tokio::spawn(internal_client_start(port));
 
     // tokio::spawn(outer_client_start());
 
     loop {
         sleep(Duration::from_secs(100)).await;
-    }
-}
-
-async fn server_start(address: String) {
-    let option = ServerOptions::default();
-
-    let atomic_server = AtomicWebsocket::get_internal_server(address, option).await;
-    let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
-
-    tokio::spawn(receive_server_handle_message(handle_message_receiver));
-}
-
-pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, String)>) {
-    while let Ok(message) = receiver.recv().await {
-        log::debug!("Message: {:?}", message);
     }
 }
 
@@ -89,7 +70,9 @@ async fn internal_client_start(port: &str) {
     let db = make_db(models, current_path);
     let db = Arc::new(RwLock::new(db));
 
-    let client_options = ClientOptions::default();
+    let mut client_options = ClientOptions::default();
+    client_options.retry_seconds = 2;
+    client_options.use_keep_ip = true;
     let atomic_client = AtomicWebsocket::get_internal_client(db.clone(), client_options).await;
 
     let status_receiver = atomic_client.get_status_receiver().await;

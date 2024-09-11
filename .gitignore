@@ -1,2 +1,4 @@
 /target
-/test/database.redb
+database.redb
+/test_server/log/
+/test_client/log/

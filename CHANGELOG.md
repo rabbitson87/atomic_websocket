@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.7
+
+* Change refactor loop client, split test in client and server.
+
 ## 0.3.6
 
 * Add for client ping delay using retry_seconds option.
