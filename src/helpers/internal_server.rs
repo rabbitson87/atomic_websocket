@@ -149,7 +149,9 @@ pub async fn handle_connection(
                                 if data.category == Category::Disconnect as u16 {
                                     break;
                                 }
-                                client_senders.send_handle_message(data, id.copy_string());
+                                client_senders
+                                    .send_handle_message(data, id.copy_string())
+                                    .await;
                             }
                         }
                     }
@@ -205,7 +207,8 @@ async fn get_id_from_first_message(
                             data.category = options.proxy_ping as u16;
                         }
                         client_senders
-                            .send_handle_message(data, _id.as_ref().unwrap().copy_string());
+                            .send_handle_message(data, _id.as_ref().unwrap().copy_string())
+                            .await;
                     }
                 }
             }

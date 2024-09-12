@@ -140,8 +140,8 @@ impl ServerSender {
 #[async_trait]
 pub trait ServerSenderTrait {
     async fn add(&self, sx: mpsc::Sender<Message>, server_ip: String);
-    fn send_status(&self, status: SenderStatus);
-    fn send_handle_message(&self, data: Data<'_>);
+    async fn send_status(&self, status: SenderStatus);
+    async fn send_handle_message(&self, data: Data<'_>);
     async fn get_status_receiver(&self) -> Receiver<SenderStatus>;
     async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>>;
     async fn send(&self, message: Message);
@@ -212,21 +212,19 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         clone.get_handle_message_receiver()
     }
 
-    fn send_status(&self, status: SenderStatus) {
+    async fn send_status(&self, status: SenderStatus) {
         let clone = self.clone();
-        tokio::spawn(async move {
-            clone.read().await.send_status(status);
-        });
+        clone.read().await.send_status(status);
+        drop(clone);
     }
 
-    fn send_handle_message(&self, data: Data<'_>) {
+    async fn send_handle_message(&self, data: Data<'_>) {
         let clone = self.clone();
 
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
-        tokio::spawn(async move {
-            let _ = clone.write().await.send_handle_message(buf);
-        });
+        let _ = clone.write().await.send_handle_message(buf);
+        drop(clone);
     }
 
     async fn send(&self, message: Message) {

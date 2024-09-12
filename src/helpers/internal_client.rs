@@ -133,7 +133,7 @@ async fn internal_ping_loop_cheker(
             || server_sender_clone.server_ip.is_empty()
         {
             drop(server_sender_clone);
-            server_sender.send_status(SenderStatus::Disconnected);
+            server_sender.send_status(SenderStatus::Disconnected).await;
             if !use_keep_ip {
                 server_sender.change_ip("".into()).await;
                 let server_sender_clone = server_sender.clone();
@@ -210,7 +210,7 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             || server_sender_clone.server_ip.is_empty()
         {
             drop(server_sender_clone);
-            server_sender.send_status(SenderStatus::Disconnected);
+            server_sender.send_status(SenderStatus::Disconnected).await;
 
             if !use_keep_ip {
                 server_sender.change_ip("".into()).await;
@@ -246,7 +246,7 @@ pub async fn get_outer_connect(
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
     if server_sender.is_valid_server_ip().await {
-        server_sender.send_status(SenderStatus::Connected);
+        server_sender.send_status(SenderStatus::Connected).await;
         return Ok(());
     }
     let server_connect_info =
@@ -258,7 +258,7 @@ pub async fn get_outer_connect(
     }
 
     if options.url.is_empty() && !server_sender.is_valid_server_ip().await {
-        server_sender.send_status(SenderStatus::Disconnected);
+        server_sender.send_status(SenderStatus::Disconnected).await;
         return Ok(());
     }
 
@@ -273,7 +273,7 @@ pub async fn get_internal_connect(
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
     if server_sender.is_valid_server_ip().await {
-        server_sender.send_status(SenderStatus::Connected);
+        server_sender.send_status(SenderStatus::Connected).await;
         return Ok(());
     }
     let server_connect_info =
@@ -302,7 +302,7 @@ pub async fn get_internal_connect(
     }
 
     if input.is_none() && server_connect_info.is_none() {
-        server_sender.send_status(SenderStatus::Disconnected);
+        server_sender.send_status(SenderStatus::Disconnected).await;
         return Ok(());
     }
 
@@ -330,7 +330,7 @@ pub async fn get_internal_connect(
         || connect_info_data.broadcast_ip.is_empty()
         || connect_info_data.gateway_ip.is_empty()
     {
-        server_sender.send_status(SenderStatus::Disconnected);
+        server_sender.send_status(SenderStatus::Disconnected).await;
         return Ok(());
     }
 

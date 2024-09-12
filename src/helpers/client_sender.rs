@@ -117,7 +117,7 @@ impl ClientSenders {
 pub trait ClientSendersTrait {
     async fn add(&self, peer: String, sx: Sender<Message>);
     async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)>;
-    fn send_handle_message(&self, data: Data<'_>, peer: String);
+    async fn send_handle_message(&self, data: Data<'_>, peer: String);
     async fn send(&self, peer: String, message: Message);
     async fn expire_send(&self, peer_list: Vec<String>);
 }
@@ -135,15 +135,13 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
         clone.get_handle_message_receiver()
     }
 
-    fn send_handle_message(&self, data: Data<'_>, peer: String) {
+    async fn send_handle_message(&self, data: Data<'_>, peer: String) {
         let clone = self.clone();
 
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
-        tokio::spawn(async move {
-            let _ = clone.write().await.send_handle_message(buf, peer);
-            drop(clone);
-        });
+        let _ = clone.write().await.send_handle_message(buf, peer);
+        drop(clone);
     }
 
     async fn send(&self, peer: String, message: Message) {

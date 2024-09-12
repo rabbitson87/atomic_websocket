@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.10
+
+* Change communicate message to async.
+
 ## 0.3.9
 
 * Add rinf debug option.

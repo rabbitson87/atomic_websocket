@@ -89,7 +89,7 @@ pub async fn handle_websocket(
                 if data.category == Category::Pong as u16 {
                     if is_first {
                         is_first = false;
-                        server_sender.send_status(SenderStatus::Connected);
+                        server_sender.send_status(SenderStatus::Connected).await;
                     }
                     let server_sender_clone = server_sender.clone();
                     tokio::spawn(async move {
@@ -100,7 +100,7 @@ pub async fn handle_websocket(
                 } else if data.category == Category::Disconnect as u16 {
                     break;
                 }
-                server_sender.send_handle_message(data);
+                server_sender.send_handle_message(data).await;
             }
         }
     });
