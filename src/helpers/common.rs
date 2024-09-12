@@ -11,41 +11,67 @@ use crate::{
 };
 
 #[cfg(feature = "rinf")]
+#[cfg(not(feature = "debug"))]
 #[macro_export]
 macro_rules! log_debug {
     ($($rest:tt)*) => {
-        if (cfg!(feature = "rinf")) {
+        if cfg!(feature = "rinf") {
             rinf::debug_print!($($rest)*);
         }
     };
 }
 
 #[cfg(not(feature = "rinf"))]
+#[cfg(feature = "debug")]
 #[macro_export]
 macro_rules! log_debug {
     ($($rest:tt)*) => {
-        if (cfg!(feature = "debug")) {
+        if cfg!(feature = "debug") {
             log::debug!($($rest)*)
         }
     };
 }
 
+#[cfg(not(feature = "rinf"))]
+#[cfg(not(feature = "debug"))]
+#[macro_export]
+macro_rules! log_debug {
+    ($($rest:tt)*) => {
+        if cfg!(debug_assertions) {
+            println!($($rest)*)
+        }
+    };
+}
+
 #[cfg(feature = "rinf")]
+#[cfg(not(feature = "debug"))]
 #[macro_export]
 macro_rules! log_error {
     ($($rest:tt)*) => {
-        if (cfg!(feature = "rinf")) {
+        if cfg!(feature = "rinf") {
             rinf::debug_print!($($rest)*);
         }
     };
 }
 
 #[cfg(not(feature = "rinf"))]
+#[cfg(feature = "debug")]
 #[macro_export]
 macro_rules! log_error {
     ($($rest:tt)*) => {
-        if (cfg!(feature = "debug")) {
+        if cfg!(feature = "debug") {
             log::error!($($rest)*)
+        }
+    };
+}
+
+#[cfg(not(feature = "rinf"))]
+#[cfg(not(feature = "debug"))]
+#[macro_export]
+macro_rules! log_error {
+    ($($rest:tt)*) => {
+        if cfg!(debug_assertions) {
+            println!($($rest)*)
         }
     };
 }
