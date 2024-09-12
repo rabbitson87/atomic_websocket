@@ -23,17 +23,19 @@ native_model = "0.4.19"
 tokio-tungstenite = "0.23.1"
 nanoid = "0.4.0"
 futures-util = "0.3.30"
-log = "0.4.22"
 
 bebop = "3.0.14"
 chrono = { version = "0.4.38", default-features = false, features = ["clock"] }
 serde = { version = "1.0.210", features = ["derive"] }
 native-tls = { version = "0.2.12", optional = true }
+rinf = { version = "6.15.0", optional = true }
+log = { version = "0.4.22", optional = true }
 
 [workspace]
 members = ["make_bebop", "test_server", "test_client"]
 
 [features]
 default = []
-debug = []
+debug = ["dep:log"]
 native_tls = ["dep:native-tls", "tokio-tungstenite/native-tls"]
+rinf = ["dep:rinf"]

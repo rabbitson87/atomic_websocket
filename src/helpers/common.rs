@@ -10,6 +10,17 @@ use crate::{
     Settings,
 };
 
+#[cfg(feature = "rinf")]
+#[macro_export]
+macro_rules! log_debug {
+    ($($rest:tt)*) => {
+        if (cfg!(feature = "rinf")) {
+            rinf::debug_print!($($rest)*);
+        }
+    };
+}
+
+#[cfg(not(feature = "rinf"))]
 #[macro_export]
 macro_rules! log_debug {
     ($($rest:tt)*) => {
@@ -18,6 +29,18 @@ macro_rules! log_debug {
         }
     };
 }
+
+#[cfg(feature = "rinf")]
+#[macro_export]
+macro_rules! log_error {
+    ($($rest:tt)*) => {
+        if (cfg!(feature = "rinf")) {
+            rinf::debug_print!($($rest)*);
+        }
+    };
+}
+
+#[cfg(not(feature = "rinf"))]
 #[macro_export]
 macro_rules! log_error {
     ($($rest:tt)*) => {

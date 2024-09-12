@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.9
+
+* Add rinf debug option.
+
 ## 0.3.8
 
 * Change server sender to improve response.
