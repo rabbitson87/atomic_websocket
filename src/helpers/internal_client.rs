@@ -125,7 +125,8 @@ async fn internal_ping_loop_cheker(
     let use_keep_ip = options.use_keep_ip;
     loop {
         tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
-        let server_sender_clone = server_sender.read().await;
+        let server_sender_clone = server_sender.clone();
+        let server_sender_clone = server_sender_clone.read().await;
         if server_sender_clone.server_send_times > 0
             && server_sender_clone.server_send_times + (retry_seconds as i64 * 3)
                 < now().timestamp()
@@ -135,7 +136,8 @@ async fn internal_ping_loop_cheker(
             server_sender.send_status(SenderStatus::Disconnected);
             if !use_keep_ip {
                 server_sender.change_ip("".into()).await;
-                let server_sender_clone = server_sender.read().await;
+                let server_sender_clone = server_sender.clone();
+                let server_sender_clone = server_sender_clone.read().await;
                 let db = server_sender_clone.db.clone();
                 drop(server_sender_clone);
                 let server_connect_info = match get_setting_by_key(
@@ -175,8 +177,8 @@ async fn internal_ping_loop_cheker(
             let server_sender_clone = server_sender.clone();
             let options_clone = options.clone();
             tokio::spawn(async move {
-                let server_sender_clone2 = server_sender_clone.read().await;
-                let db = server_sender_clone2.db.clone();
+                let server_sender_clone2 = server_sender_clone.clone();
+                let db = server_sender_clone2.read().await.db.clone();
                 drop(server_sender_clone2);
                 let _ = get_internal_connect(None, db, server_sender_clone, options_clone).await;
                 true
@@ -202,7 +204,8 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
     let use_keep_ip = options.use_keep_ip;
     loop {
         tokio::time::sleep(Duration::from_secs(30)).await;
-        let server_sender_clone = server_sender.read().await;
+        let server_sender_clone = server_sender.clone();
+        let server_sender_clone = server_sender_clone.read().await;
         if server_sender_clone.server_send_times + 90 < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
@@ -216,8 +219,8 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             let server_sender_clone = server_sender.clone();
             let options_clone = options.clone();
             tokio::spawn(async move {
-                let server_sender_clone2 = server_sender_clone.read().await;
-                let db = server_sender_clone2.db.clone();
+                let server_sender_clone2 = server_sender_clone.clone();
+                let db = server_sender_clone2.read().await.db.clone();
                 drop(server_sender_clone2);
                 let _ = get_outer_connect(db, server_sender_clone, options_clone).await;
                 true
@@ -251,7 +254,7 @@ pub async fn get_outer_connect(
     log_debug!("server_connect_info: {:?}", server_connect_info);
 
     if !options.url.is_empty() {
-        server_sender.change_ip(options.url.clone()).await;
+        server_sender.change_ip(options.url.copy_string()).await;
     }
 
     if options.url.is_empty() && !server_sender.is_valid_server_ip().await {

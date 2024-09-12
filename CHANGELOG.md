@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.8
+
+* Change server sender to improve response.
+
 ## 0.3.7
 
 * Change refactor loop client, split test in client and server.

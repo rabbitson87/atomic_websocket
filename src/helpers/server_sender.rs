@@ -94,6 +94,7 @@ impl ServerSender {
                     self.server_send_times = now().timestamp();
                 }
                 Err(e) => {
+                    drop(sender);
                     log_error!("Error server sending message: {:?}", e);
                     self.send_status(SenderStatus::Disconnected);
 
@@ -108,12 +109,14 @@ impl ServerSender {
                     };
                     while send_result == false {
                         sleep(Duration::from_secs(1)).await;
+                        let sender = sx.clone();
                         match sender.send(message.clone()).await {
                             Ok(_) => {
                                 send_result = true;
                                 self.server_send_times = now().timestamp();
                             }
                             Err(e) => {
+                                drop(sender);
                                 if count > limit_count {
                                     tokio::spawn(wrap_get_internal_websocket(
                                         self.db.clone(),
