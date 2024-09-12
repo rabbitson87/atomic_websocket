@@ -26,7 +26,8 @@ pub struct ClientSenders {
 
 impl ClientSenders {
     pub fn new() -> Self {
-        let (handle_message_sx, _) = broadcast::channel(4);
+        let (handle_message_sx, rx) = broadcast::channel(1024);
+        drop(rx);
         Self {
             lists: Vec::new(),
             handle_message_sx,
@@ -99,13 +100,14 @@ impl ClientSenders {
                         Err(e) => {
                             if count > 5 {
                                 result = false;
+                                drop(sender);
                                 break;
                             }
                             log_error!("Error client sending message: {:?}", e);
                             count += 1;
+                            sleep(Duration::from_secs(1)).await;
                         }
                     }
-                    sleep(Duration::from_secs(1)).await;
                 }
             }
         }

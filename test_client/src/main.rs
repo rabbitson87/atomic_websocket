@@ -7,11 +7,13 @@ use std::{
 };
 
 use atomic_websocket::{
+    common::{get_id, make_response_message},
     external::native_db::{Builder, Database, Models},
-    schema::ServerConnectInfo,
-    server_sender::{ClientOptions, SenderStatus},
+    schema::{AppStartup, ServerConnectInfo},
+    server_sender::{ClientOptions, SenderStatus, ServerSenderTrait},
     AtomicWebsocket, Settings,
 };
+use bebop::Record;
 use tokio::{
     sync::{broadcast::Receiver, RwLock},
     time::sleep,
@@ -93,6 +95,26 @@ async fn internal_client_start(port: &str) {
             db.clone(),
         )
         .await;
+
+    let server_sender = atomic_client.server_sender.clone();
+
+    let id = get_id(db.clone()).await;
+    loop {
+        sleep(Duration::from_millis(200)).await;
+        let mut datas = vec![];
+        AppStartup {
+            id: &id,
+            app_type: 1,
+        }
+        .serialize(&mut datas)
+        .unwrap();
+        server_sender
+            .send(make_response_message(
+                atomic_websocket::schema::Category::AppStartup,
+                datas,
+            ))
+            .await;
+    }
 }
 
 pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {

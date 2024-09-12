@@ -108,7 +108,6 @@ impl ServerSender {
                         },
                     };
                     while send_result == false {
-                        sleep(Duration::from_secs(1)).await;
                         let sender = sx.clone();
                         match sender.send(message.clone()).await {
                             Ok(_) => {
@@ -128,6 +127,7 @@ impl ServerSender {
                                 }
                                 log_error!("Error server sending message: {:?}", e);
                                 count += 1;
+                                sleep(Duration::from_secs(1)).await;
                             }
                         };
                     }

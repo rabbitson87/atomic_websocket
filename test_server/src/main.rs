@@ -1,22 +1,11 @@
-use std::{
-    env::current_dir,
-    error::Error,
-    path::PathBuf,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{env::current_dir, error::Error, path::PathBuf, sync::OnceLock, time::Duration};
 
 use atomic_websocket::{
     client_sender::ServerOptions,
     external::native_db::{Builder, Database, Models},
-    schema::ServerConnectInfo,
-    server_sender::{ClientOptions, SenderStatus},
     AtomicWebsocket, Settings,
 };
-use tokio::{
-    sync::{broadcast::Receiver, RwLock},
-    time::sleep,
-};
+use tokio::{sync::broadcast::Receiver, time::sleep};
 
 #[tokio::main]
 async fn main() {

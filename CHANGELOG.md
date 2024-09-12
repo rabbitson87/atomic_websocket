@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.11
+
+* Change server message channel. 4 -> 1024
+
 ## 0.3.10
 
 * Change communicate message to async.

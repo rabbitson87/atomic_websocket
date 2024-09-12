@@ -9,6 +9,7 @@ atomic_websocket = { path = "../", features = ["debug"] }
 log = "0.4.22"
 log4rs = "1.3.0"
 serde_yaml = "0.9.33"
+bebop = "3.0.14"
 
 [profile.dev]
 opt-level = 0
