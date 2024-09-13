@@ -6,7 +6,7 @@ use native_db::Database;
 use std::time::Duration;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, RwLock},
+    sync::{mpsc, Mutex, RwLock},
     time::sleep,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -14,9 +14,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 use crate::{
     generated::schema::{Category, Data, SaveKey},
     helpers::{
-        common::make_ping_message,
+        common::{make_disconnect_message, make_ping_message},
         server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
-        traits::StringUtil,
+        traits::{ping::PingCheck, StringUtil},
     },
     log_debug, log_error, Settings,
 };
@@ -82,6 +82,7 @@ pub async fn handle_websocket(
     let retry_seconds = options.retry_seconds;
     let mut is_first = true;
     tokio::spawn(async move {
+        let is_wait_ping = Arc::new(Mutex::new(false));
         while let Some(Ok(Message::Binary(value))) = istream.next().await {
             if let Ok(data) = Data::deserialize(&value) {
                 let id_clone = id.copy_string();
@@ -91,13 +92,23 @@ pub async fn handle_websocket(
                         is_first = false;
                         server_sender.send_status(SenderStatus::Connected).await;
                     }
-                    let server_sender_clone = server_sender.clone();
-                    tokio::spawn(async move {
-                        sleep(Duration::from_secs(retry_seconds)).await;
-                        server_sender_clone.send(make_ping_message(&id_clone)).await;
-                    });
+                    if !is_wait_ping.is_wait_ping().await {
+                        is_wait_ping.set_wait_ping(true).await;
+                        let server_sender_clone = server_sender.clone();
+                        let is_wait_ping_clone = is_wait_ping.clone();
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(retry_seconds)).await;
+                            server_sender_clone.send(make_ping_message(&id_clone)).await;
+                            is_wait_ping_clone.set_wait_ping(false).await;
+                        });
+                    }
                     continue;
                 } else if data.category == Category::Disconnect as u16 {
+                    let _ = sx
+                        .send(make_disconnect_message(
+                            &server_sender.get_server_ip().await,
+                        ))
+                        .await;
                     break;
                 }
                 server_sender.send_handle_message(data).await;
@@ -112,6 +123,7 @@ pub async fn handle_websocket(
                 if let Ok(data) = Data::deserialize(&data) {
                     log_debug!("Send message: {:?}", data);
                     if data.category == Category::Disconnect as u16 {
+                        rx.close();
                         break;
                     }
                 }

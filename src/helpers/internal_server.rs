@@ -135,7 +135,6 @@ pub async fn handle_connection(
 
                 match id {
                     Some(id) => {
-                        drop(sx);
                         while let Some(Ok(Message::Binary(value))) = istream.next().await {
                             if let Ok(data) = Data::deserialize(&value) {
                                 if data.category == Category::Ping as u16 && use_ping {
@@ -147,6 +146,8 @@ pub async fn handle_connection(
                                     }
                                 }
                                 if data.category == Category::Disconnect as u16 {
+                                    let _ =
+                                        sx.send(make_disconnect_message(&peer.to_string())).await;
                                     break;
                                 }
                                 client_senders
@@ -167,6 +168,7 @@ pub async fn handle_connection(
                 if let Ok(data) = Data::deserialize(&data) {
                     log_debug!("Server sending message: {:?}", data);
                     if data.category == Category::Disconnect as u16 {
+                        rx.close();
                         break;
                     }
                 }

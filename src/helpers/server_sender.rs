@@ -23,7 +23,7 @@ use crate::{
 
 use crate::helpers::traits::date_time::now;
 
-use super::internal_client::ClientOptions;
+use super::{common::make_disconnect_message, internal_client::ClientOptions};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SenderStatus {
@@ -72,6 +72,15 @@ impl ServerSender {
         self.server_sender = Some(server_sender);
     }
     pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: String) {
+        if self.sx.is_some() {
+            let sender = self.sx.clone().unwrap();
+            let server_ip = self.server_ip.copy_string();
+            tokio::spawn(async move {
+                let _ = sender.send(make_disconnect_message(&server_ip)).await;
+                sender.closed().await;
+            });
+            self.sx = None;
+        }
         self.sx = Some(sx);
         self.server_ip = server_ip;
     }

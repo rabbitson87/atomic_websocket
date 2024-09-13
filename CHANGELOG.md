@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.12
+
+* Add disconnect for client when duplicate connector.
+
 ## 0.3.11
 
 * Change server message channel. 4 -> 1024
