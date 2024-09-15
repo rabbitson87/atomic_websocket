@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.13
+
+* Fixed for is_avalid_server_ip condition.
+
 ## 0.3.12
 
 * Add disconnect for client when duplicate connector.
