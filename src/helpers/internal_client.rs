@@ -354,7 +354,7 @@ pub async fn get_internal_connect(
                         options.clone(),
                     ));
                 }
-                if ip == 255 {
+                if ip == 254 {
                     break;
                 }
                 ip += 1;

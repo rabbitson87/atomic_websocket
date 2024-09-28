@@ -86,9 +86,9 @@ async fn internal_client_start(port: &str) {
     let _ = atomic_client
         .get_internal_connect(
             Some(ServerConnectInfo {
-                current_ip: "192.168.200.194",
-                broadcast_ip: "192.168.200.255",
-                gateway_ip: "192.168.200.254",
+                current_ip: "192.168.2.25",
+                broadcast_ip: "192.168.2.255",
+                gateway_ip: "192.168.2.254",
                 server_ip: "",
                 port,
             }),

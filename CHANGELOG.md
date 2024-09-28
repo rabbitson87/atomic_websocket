@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.14
+
+* Update dependencies.
+
 ## 0.3.13
 
 * Fixed for is_avalid_server_ip condition.
