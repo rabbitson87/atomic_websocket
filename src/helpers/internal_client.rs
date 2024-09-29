@@ -8,7 +8,7 @@ use crate::helpers::{
     common::{get_setting_by_key, make_ping_message},
     get_internal_websocket::{get_id, wrap_get_internal_websocket},
     server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
-    traits::{date_time::now, ip::get_ip, StringUtil},
+    traits::{date_time::now, StringUtil},
 };
 use crate::{log_debug, log_error, Settings};
 use bebop::Record;
@@ -327,11 +327,11 @@ pub async fn get_internal_connect(
 
     match connect_info_data.server_ip {
         "" => {
-            let mut ip = 1_u8;
+            let mut sub_ip = 1_u8;
             loop {
                 let server_url = format!(
                     "ws://{}.{}.{}.{}:{}",
-                    ips[0], ips[1], ips[2], ip, connect_info_data.port
+                    ips[0], ips[1], ips[2], sub_ip, connect_info_data.port
                 );
                 let db_clone = db.clone();
                 let server_sender_clone = server_sender.clone();
@@ -342,24 +342,19 @@ pub async fn get_internal_connect(
                     server_url.copy_string(),
                     options.clone(),
                 ));
-                if ip == 254 {
+                if sub_ip == 254 {
                     break;
                 }
-                ip += 1;
+                sub_ip += 1;
             }
         }
         _server_ip => {
-            let ip = get_ip(_server_ip);
-            let server_url = format!(
-                "ws://{}.{}.{}.{}:{}",
-                ips[0], ips[1], ips[2], ip, connect_info_data.port
-            );
             let db_clone = db.clone();
             let server_sender_clone = server_sender.clone();
             tokio::spawn(wrap_get_internal_websocket(
                 db_clone,
                 server_sender_clone,
-                server_url.copy_string(),
+                _server_ip.into(),
                 options.clone(),
             ));
         }

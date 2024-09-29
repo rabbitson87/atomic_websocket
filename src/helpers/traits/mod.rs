@@ -1,5 +1,4 @@
 pub mod date_time;
-pub mod ip;
 pub mod ping;
 
 pub trait StringUtil {
