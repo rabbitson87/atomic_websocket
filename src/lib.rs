@@ -30,7 +30,9 @@ pub mod client_sender {
 }
 
 pub mod server_sender {
-    pub use crate::helpers::internal_client::{get_internal_connect, ClientOptions};
+    pub use crate::helpers::internal_client::{
+        get_internal_connect, get_ip_address, ClientOptions,
+    };
     pub use crate::helpers::server_sender::*;
 }
 

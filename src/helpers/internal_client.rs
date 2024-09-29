@@ -362,7 +362,7 @@ pub async fn get_internal_connect(
     Ok(())
 }
 
-fn get_ip_address() -> String {
+pub fn get_ip_address() -> String {
     let socket = UdpSocket::bind("0.0.0.0:0");
     let socket = match socket {
         Ok(socket) => socket,

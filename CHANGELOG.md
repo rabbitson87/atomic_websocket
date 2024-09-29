@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.17
+
+* Add function is get_ip_address.
+
 ## 0.3.16
 
 * Fixed for connect server_ip.
