@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::net::UdpSocket;
 use std::{sync::Arc, time::Duration};
 
 use crate::generated::schema::{SaveKey, ServerConnectInfo};
@@ -7,11 +8,7 @@ use crate::helpers::{
     common::{get_setting_by_key, make_ping_message},
     get_internal_websocket::{get_id, wrap_get_internal_websocket},
     server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
-    traits::{
-        date_time::now,
-        ip::{get_ip, GetIp},
-        StringUtil,
-    },
+    traits::{date_time::now, ip::get_ip, StringUtil},
 };
 use crate::{log_debug, log_error, Settings};
 use bebop::Record;
@@ -127,8 +124,8 @@ async fn internal_ping_loop_cheker(
         tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
         let server_sender_clone = server_sender.clone();
         let server_sender_clone = server_sender_clone.read().await;
-        if server_sender_clone.server_send_times > 0
-            && server_sender_clone.server_send_times + (retry_seconds as i64 * 3)
+        if server_sender_clone.server_received_times > 0
+            && server_sender_clone.server_received_times + (retry_seconds as i64 * 3)
                 < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
@@ -183,12 +180,12 @@ async fn internal_ping_loop_cheker(
                 let _ = get_internal_connect(None, db, server_sender_clone, options_clone).await;
                 true
             });
-        } else if server_sender_clone.server_send_times + (retry_seconds as i64 * 2)
+        } else if server_sender_clone.server_received_times + (retry_seconds as i64 * 2)
             < now().timestamp()
         {
             log_debug!(
                 "send: {:?}, current: {:?}",
-                server_sender_clone.server_send_times,
+                server_sender_clone.server_received_times,
                 now().timestamp()
             );
             log_debug!("Try ping from loop checker");
@@ -206,7 +203,7 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
         tokio::time::sleep(Duration::from_secs(30)).await;
         let server_sender_clone = server_sender.clone();
         let server_sender_clone = server_sender_clone.read().await;
-        if server_sender_clone.server_send_times + 90 < now().timestamp()
+        if server_sender_clone.server_received_times + 90 < now().timestamp()
             || server_sender_clone.server_ip.is_empty()
         {
             drop(server_sender_clone);
@@ -225,10 +222,10 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
                 let _ = get_outer_connect(db, server_sender_clone, options_clone).await;
                 true
             });
-        } else if server_sender_clone.server_send_times + 30 < now().timestamp() {
+        } else if server_sender_clone.server_received_times + 30 < now().timestamp() {
             log_debug!(
                 "send: {:?}, current: {:?}",
-                server_sender_clone.server_send_times,
+                server_sender_clone.server_received_times,
                 now().timestamp()
             );
             log_debug!("Try ping from loop checker");
@@ -286,9 +283,6 @@ pub async fn get_internal_connect(
         let writer = db_clone.rw_transaction()?;
         let mut value = Vec::new();
         ServerConnectInfo {
-            current_ip: &input.current_ip,
-            broadcast_ip: &input.broadcast_ip,
-            gateway_ip: &input.gateway_ip,
             server_ip: "".into(),
             port: &input.port,
         }
@@ -308,9 +302,6 @@ pub async fn get_internal_connect(
 
     let connect_info_data = match input.as_ref() {
         Some(info) => ServerConnectInfo {
-            current_ip: &info.current_ip,
-            broadcast_ip: &info.broadcast_ip,
-            gateway_ip: &info.gateway_ip,
             server_ip: match server_connect_info.as_ref() {
                 Some(server_connect_info) => {
                     ServerConnectInfo::deserialize(&server_connect_info.value)
@@ -326,34 +317,31 @@ pub async fn get_internal_connect(
         }
     };
 
-    if connect_info_data.current_ip.is_empty()
-        || connect_info_data.broadcast_ip.is_empty()
-        || connect_info_data.gateway_ip.is_empty()
-    {
+    let ip = get_ip_address();
+
+    if ip.is_empty() {
         server_sender.send_status(SenderStatus::Disconnected).await;
         return Ok(());
     }
-
-    let mut info = connect_info_data.get_ip_range();
-    let (exclude_ips, broadcast_ip, _) = info.get_data();
+    let ips = ip.split('.').collect::<Vec<&str>>();
 
     match connect_info_data.server_ip {
         "" => {
             let mut ip = 1_u8;
-            while ip <= broadcast_ip {
-                if !exclude_ips.contains(&ip) {
-                    info.set_server_ip(ip);
-                    let server_url = info.get_full_server_ip();
-                    let db_clone = db.clone();
-                    let server_sender_clone = server_sender.clone();
+            loop {
+                let server_url = format!(
+                    "ws://{}.{}.{}.{}:{}",
+                    ips[0], ips[1], ips[2], ip, connect_info_data.port
+                );
+                let db_clone = db.clone();
+                let server_sender_clone = server_sender.clone();
 
-                    tokio::spawn(wrap_get_internal_websocket(
-                        db_clone,
-                        server_sender_clone,
-                        server_url.copy_string(),
-                        options.clone(),
-                    ));
-                }
+                tokio::spawn(wrap_get_internal_websocket(
+                    db_clone,
+                    server_sender_clone,
+                    server_url.copy_string(),
+                    options.clone(),
+                ));
                 if ip == 254 {
                     break;
                 }
@@ -362,8 +350,10 @@ pub async fn get_internal_connect(
         }
         _server_ip => {
             let ip = get_ip(_server_ip);
-            info.set_server_ip(ip);
-            let server_url = info.get_full_server_ip();
+            let server_url = format!(
+                "ws://{}.{}.{}.{}:{}",
+                ips[0], ips[1], ips[2], ip, connect_info_data.port
+            );
             let db_clone = db.clone();
             let server_sender_clone = server_sender.clone();
             tokio::spawn(wrap_get_internal_websocket(
@@ -375,4 +365,21 @@ pub async fn get_internal_connect(
         }
     }
     Ok(())
+}
+
+fn get_ip_address() -> String {
+    let socket = UdpSocket::bind("0.0.0.0:0");
+    let socket = match socket {
+        Ok(socket) => socket,
+        Err(_) => return "".into(),
+    };
+    match socket.connect("8.8.8.8:80") {
+        Ok(_) => {}
+        Err(_) => return "".into(),
+    };
+    let addr = match socket.local_addr() {
+        Ok(addr) => addr,
+        Err(_) => return "".into(),
+    };
+    addr.ip().to_string()
 }

@@ -78,7 +78,7 @@ checksum = "c59bdb34bc650a32731b31bd8f0829cc15d24a708ee31559e0bb34f2bc320cba"
 
 [[package]]
 name = "atomic_websocket"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "async-trait",
  "bebop",
@@ -139,9 +139,9 @@ dependencies = [
 
 [[package]]
 name = "bebop-tools"
-version = "3.0.14"
+version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38f55161dcb086d592b4f24869543452dad394dd5583189d3cf0c000d4bc82ce"
+checksum = "b3b68b3fd114b05449766971ee50d308843878b19aeffec7e0010f006cc6e772"
 dependencies = [
  "json",
  "reqwest",

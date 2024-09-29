@@ -37,7 +37,7 @@ pub struct ServerSender {
     pub db: Arc<RwLock<Database<'static>>>,
     pub server_sender: Option<Arc<RwLock<ServerSender>>>,
     pub server_ip: String,
-    pub server_send_times: i64,
+    pub server_received_times: i64,
     status_sx: Sender<SenderStatus>,
     handle_message_sx: Sender<Vec<u8>>,
     pub options: ClientOptions,
@@ -56,7 +56,7 @@ impl ServerSender {
             db,
             server_sender: None,
             server_ip,
-            server_send_times: 0,
+            server_received_times: 0,
             status_sx,
             handle_message_sx,
             options,
@@ -99,9 +99,7 @@ impl ServerSender {
         if let Some(sx) = &self.sx {
             let sender = sx.clone();
             match sender.send(message.clone()).await {
-                Ok(_) => {
-                    self.server_send_times = now().timestamp();
-                }
+                Ok(_) => {}
                 Err(e) => {
                     drop(sender);
                     log_error!("Error server sending message: {:?}", e);
@@ -121,7 +119,6 @@ impl ServerSender {
                         match sender.send(message.clone()).await {
                             Ok(_) => {
                                 send_result = true;
-                                self.server_send_times = now().timestamp();
                             }
                             Err(e) => {
                                 drop(sender);
@@ -158,6 +155,7 @@ pub trait ServerSenderTrait {
     async fn is_valid_server_ip(&self) -> bool;
     async fn get_server_ip(&self) -> String;
     async fn change_ip(&self, server_ip: String);
+    async fn write_received_times(&self);
 }
 
 #[async_trait]
@@ -251,7 +249,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
     async fn is_valid_server_ip(&self) -> bool {
         let clone = self.read().await;
         let result = !clone.server_ip.is_empty()
-            && clone.server_send_times
+            && clone.server_received_times
                 + (match clone.options.retry_seconds {
                     0 => 1,
                     _ => clone.options.retry_seconds as i64,
@@ -278,6 +276,12 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
     async fn change_ip(&self, server_ip: String) {
         let mut clone = self.write().await;
         clone.change_ip(server_ip);
+        drop(clone);
+    }
+
+    async fn write_received_times(&self) {
+        let mut clone = self.write().await;
+        clone.server_received_times = now().timestamp();
         drop(clone);
     }
 }

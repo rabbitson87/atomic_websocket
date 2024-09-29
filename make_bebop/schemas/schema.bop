@@ -56,9 +56,6 @@ enum SaveKey {
 }
 
 struct ServerConnectInfo {
-    string currentIp;
-    string broadcastIp;
-    string gatewayIp;
     string serverIp;
     string port;
 }

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.15
+
+* Fixed for connect state condition to write received message times.
+
 ## 0.3.14
 
 * Update dependencies.

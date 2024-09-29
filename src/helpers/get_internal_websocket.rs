@@ -94,6 +94,7 @@ pub async fn handle_websocket(
                     }
                     if !is_wait_ping.is_wait_ping().await {
                         is_wait_ping.set_wait_ping(true).await;
+                        server_sender.write_received_times().await;
                         let server_sender_clone = server_sender.clone();
                         let is_wait_ping_clone = is_wait_ping.clone();
                         tokio::spawn(async move {

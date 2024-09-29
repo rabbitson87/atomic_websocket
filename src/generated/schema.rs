@@ -497,34 +497,21 @@ impl ::bebop::FixedSized for SaveKey {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServerConnectInfo<'raw> {
-    pub current_ip: &'raw str,
-    pub broadcast_ip: &'raw str,
-    pub gateway_ip: &'raw str,
     pub server_ip: &'raw str,
     pub port: &'raw str,
 }
 
 impl<'raw> ::bebop::SubRecord<'raw> for ServerConnectInfo<'raw> {
-    const MIN_SERIALIZED_SIZE: usize = <&'raw str>::MIN_SERIALIZED_SIZE
-        + <&'raw str>::MIN_SERIALIZED_SIZE
-        + <&'raw str>::MIN_SERIALIZED_SIZE
-        + <&'raw str>::MIN_SERIALIZED_SIZE
-        + <&'raw str>::MIN_SERIALIZED_SIZE;
+    const MIN_SERIALIZED_SIZE: usize =
+        <&'raw str>::MIN_SERIALIZED_SIZE + <&'raw str>::MIN_SERIALIZED_SIZE;
 
     #[inline]
     fn serialized_size(&self) -> usize {
-        self.current_ip.serialized_size()
-            + self.broadcast_ip.serialized_size()
-            + self.gateway_ip.serialized_size()
-            + self.server_ip.serialized_size()
-            + self.port.serialized_size()
+        self.server_ip.serialized_size() + self.port.serialized_size()
     }
 
     ::bebop::define_serialize_chained!(Self => |zelf, dest| {
         Ok(
-            zelf.current_ip._serialize_chained(dest)? +
-            zelf.broadcast_ip._serialize_chained(dest)? +
-            zelf.gateway_ip._serialize_chained(dest)? +
             zelf.server_ip._serialize_chained(dest)? +
             zelf.port._serialize_chained(dest)?
         )
@@ -541,21 +528,12 @@ impl<'raw> ::bebop::SubRecord<'raw> for ServerConnectInfo<'raw> {
         i += read;
         let (read, v1) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
         i += read;
-        let (read, v2) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
-        i += read;
-        let (read, v3) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
-        i += read;
-        let (read, v4) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
-        i += read;
 
         Ok((
             i,
             Self {
-                current_ip: v0,
-                broadcast_ip: v1,
-                gateway_ip: v2,
-                server_ip: v3,
-                port: v4,
+                server_ip: v0,
+                port: v1,
             },
         ))
     }
@@ -885,9 +863,6 @@ pub mod owned {
 
     #[derive(Clone, Debug, PartialEq)]
     pub struct ServerConnectInfo {
-        pub current_ip: String,
-        pub broadcast_ip: String,
-        pub gateway_ip: String,
         pub server_ip: String,
         pub port: String,
     }
@@ -895,9 +870,6 @@ pub mod owned {
     impl<'raw> ::core::convert::From<super::ServerConnectInfo<'raw>> for ServerConnectInfo {
         fn from(value: super::ServerConnectInfo) -> Self {
             Self {
-                current_ip: value.current_ip.into(),
-                broadcast_ip: value.broadcast_ip.into(),
-                gateway_ip: value.gateway_ip.into(),
                 server_ip: value.server_ip.into(),
                 port: value.port.into(),
             }
@@ -905,26 +877,16 @@ pub mod owned {
     }
 
     impl<'raw> ::bebop::SubRecord<'raw> for ServerConnectInfo {
-        const MIN_SERIALIZED_SIZE: usize = <String>::MIN_SERIALIZED_SIZE
-            + <String>::MIN_SERIALIZED_SIZE
-            + <String>::MIN_SERIALIZED_SIZE
-            + <String>::MIN_SERIALIZED_SIZE
-            + <String>::MIN_SERIALIZED_SIZE;
+        const MIN_SERIALIZED_SIZE: usize =
+            <String>::MIN_SERIALIZED_SIZE + <String>::MIN_SERIALIZED_SIZE;
 
         #[inline]
         fn serialized_size(&self) -> usize {
-            self.current_ip.serialized_size()
-                + self.broadcast_ip.serialized_size()
-                + self.gateway_ip.serialized_size()
-                + self.server_ip.serialized_size()
-                + self.port.serialized_size()
+            self.server_ip.serialized_size() + self.port.serialized_size()
         }
 
         ::bebop::define_serialize_chained!(Self => |zelf, dest| {
             Ok(
-                zelf.current_ip._serialize_chained(dest)? +
-                zelf.broadcast_ip._serialize_chained(dest)? +
-                zelf.gateway_ip._serialize_chained(dest)? +
                 zelf.server_ip._serialize_chained(dest)? +
                 zelf.port._serialize_chained(dest)?
             )
@@ -941,21 +903,12 @@ pub mod owned {
             i += read;
             let (read, v1) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
             i += read;
-            let (read, v2) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
-            i += read;
-            let (read, v3) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
-            i += read;
-            let (read, v4) = ::bebop::SubRecord::_deserialize_chained(&raw[i..])?;
-            i += read;
 
             Ok((
                 i,
                 Self {
-                    current_ip: v0,
-                    broadcast_ip: v1,
-                    gateway_ip: v2,
-                    server_ip: v3,
-                    port: v4,
+                    server_ip: v0,
+                    port: v1,
                 },
             ))
         }

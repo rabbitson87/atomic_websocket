@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bebop-tools = "3.0.14"
-bebop = "3.0.14"
+bebop-tools = "3.1.2"
+bebop = "3.1.2"
