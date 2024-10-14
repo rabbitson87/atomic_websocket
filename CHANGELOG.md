@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.18
+
+* Update dependencies.
+
 ## 0.3.17
 
 * Add function is get_ip_address.

@@ -83,7 +83,7 @@ pub async fn get_setting_by_key(
     let db = db.read().await;
     let reader = db.r_transaction()?;
 
-    for setting in reader.scan().primary::<Settings>()?.all() {
+    for setting in reader.scan().primary::<Settings>()?.all()? {
         if let Ok(setting) = setting {
             if &setting.key == &key {
                 return Ok(Some(setting));
@@ -105,7 +105,7 @@ pub async fn set_setting(
     drop(reader);
 
     let mut setting = None;
-    for setting_item in list.all() {
+    for setting_item in list.all()? {
         if let Ok(setting_item) = setting_item {
             if &setting_item.key == &settings.key {
                 setting = Some(setting_item);

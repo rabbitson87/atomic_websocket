@@ -146,7 +146,7 @@ pub async fn get_id(db: Arc<RwLock<Database<'static>>>) -> String {
     let data = reader.scan().primary::<Settings>().unwrap();
     drop(reader);
     let mut id: Option<String> = None;
-    for setting in data.all() {
+    for setting in data.all().unwrap() {
         if let Ok(setting) = setting {
             if setting.key == format!("{:?}", SaveKey::ClientId) {
                 id = Some(String::from_utf8(setting.value).unwrap().into());
