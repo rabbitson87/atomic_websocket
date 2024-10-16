@@ -46,9 +46,16 @@ impl Default for ServerOptions {
 }
 
 impl AtomicServer {
-    pub async fn new(addr: &str, option: ServerOptions) -> Self {
+    pub async fn new(
+        addr: &str,
+        option: ServerOptions,
+        client_senders: Option<Arc<RwLock<ClientSenders>>>,
+    ) -> Self {
         let listener = TcpListener::bind(&addr).await.expect("Can't listen");
-        let client_senders = Arc::new(RwLock::new(ClientSenders::new()));
+        let client_senders = match client_senders {
+            Some(client_senders) => client_senders,
+            None => Arc::new(RwLock::new(ClientSenders::new())),
+        };
         tokio::spawn(handle_accept(listener, client_senders.clone(), option));
 
         tokio::spawn(loop_client_checker(client_senders.clone()));

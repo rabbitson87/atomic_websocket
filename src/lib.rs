@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use client_sender::ClientSenders;
 use helpers::{
     internal_client::{AtomicClient, ClientOptions},
     internal_server::{AtomicServer, ServerOptions},
@@ -58,49 +59,90 @@ pub struct Settings {
 
 pub struct AtomicWebsocket {}
 
+enum AtomicWebsocketType {
+    Internal,
+    Outer,
+}
+
 impl AtomicWebsocket {
     pub async fn get_internal_client(
         db: Arc<RwLock<Database<'static>>>,
         options: ClientOptions,
     ) -> AtomicClient {
-        let mut server_sender = Arc::new(RwLock::new(ServerSender::new(
-            db.clone(),
-            "".into(),
-            options.clone(),
-        )));
-        server_sender.regist(server_sender.clone()).await;
-
-        let atomic_websocket: AtomicClient = AtomicClient {
-            server_sender,
+        get_client(db, options, AtomicWebsocketType::Internal, None).await
+    }
+    pub async fn get_internal_client_with_server_sender(
+        db: Arc<RwLock<Database<'static>>>,
+        options: ClientOptions,
+        server_sender: Arc<RwLock<ServerSender>>,
+    ) -> AtomicClient {
+        get_client(
+            db,
             options,
-        };
-        atomic_websocket.internal_initialize(db.clone()).await;
-        atomic_websocket
+            AtomicWebsocketType::Internal,
+            Some(server_sender),
+        )
+        .await
     }
 
     pub async fn get_outer_client(
         db: Arc<RwLock<Database<'static>>>,
         options: ClientOptions,
     ) -> AtomicClient {
-        let mut server_sender = Arc::new(RwLock::new(ServerSender::new(
-            db.clone(),
-            match options.url.is_empty() {
-                true => "".into(),
-                false => options.url.clone(),
-            },
-            options.clone(),
-        )));
-        server_sender.regist(server_sender.clone()).await;
+        get_client(db, options, AtomicWebsocketType::Outer, None).await
+    }
 
-        let atomic_websocket: AtomicClient = AtomicClient {
-            server_sender,
-            options,
-        };
-        atomic_websocket.outer_initialize(db.clone()).await;
-        atomic_websocket
+    pub async fn get_outer_client_with_server_sender(
+        db: Arc<RwLock<Database<'static>>>,
+        options: ClientOptions,
+        server_sender: Arc<RwLock<ServerSender>>,
+    ) -> AtomicClient {
+        get_client(db, options, AtomicWebsocketType::Outer, Some(server_sender)).await
     }
 
     pub async fn get_internal_server(addr: String, option: ServerOptions) -> AtomicServer {
-        AtomicServer::new(&addr, option).await
+        AtomicServer::new(&addr, option, None).await
     }
+
+    pub async fn get_internal_server_with_client_senders(
+        addr: String,
+        option: ServerOptions,
+        client_senders: Arc<RwLock<ClientSenders>>,
+    ) -> AtomicServer {
+        AtomicServer::new(&addr, option, Some(client_senders)).await
+    }
+}
+
+async fn get_client(
+    db: Arc<RwLock<Database<'static>>>,
+    options: ClientOptions,
+    atomic_websocket_type: AtomicWebsocketType,
+    server_sender: Option<Arc<RwLock<ServerSender>>>,
+) -> AtomicClient {
+    let mut server_sender = match server_sender {
+        Some(server_sender) => {
+            let server_sender_clone = server_sender.clone();
+            let mut server_sender_clone = server_sender_clone.write().await;
+            server_sender_clone.server_ip = options.url.clone();
+            server_sender_clone.options = options.clone();
+            drop(server_sender_clone);
+            server_sender
+        }
+        None => Arc::new(RwLock::new(ServerSender::new(
+            db.clone(),
+            options.url.clone(),
+            options.clone(),
+        ))),
+    };
+    server_sender.regist(server_sender.clone()).await;
+
+    let atomic_websocket: AtomicClient = AtomicClient {
+        server_sender,
+        options,
+    };
+    match atomic_websocket_type {
+        AtomicWebsocketType::Internal => atomic_websocket.internal_initialize(db.clone()).await,
+        AtomicWebsocketType::Outer => atomic_websocket.outer_initialize(db.clone()).await,
+    }
+    atomic_websocket
 }
