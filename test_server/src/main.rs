@@ -1,11 +1,23 @@
-use std::{env::current_dir, error::Error, path::PathBuf, sync::OnceLock, time::Duration};
+use std::{
+    env::current_dir,
+    error::Error,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use atomic_websocket::{
-    client_sender::ServerOptions,
+    client_sender::{ClientSenders, ClientSendersTrait, ServerOptions},
+    common::make_response_message,
     external::native_db::{Builder, Database, Models},
+    schema::{AppStartupOutput, Category, Data},
     AtomicWebsocket, Settings,
 };
-use tokio::{sync::broadcast::Receiver, time::sleep};
+use bebop::Record;
+use tokio::{
+    sync::{broadcast::Receiver, RwLock},
+    time::sleep,
+};
 
 #[tokio::main]
 async fn main() {
@@ -26,15 +38,41 @@ async fn main() {
 async fn server_start(address: String) {
     let option = ServerOptions::default();
 
-    let atomic_server = AtomicWebsocket::get_internal_server(address, option).await;
+    let atomic_server = AtomicWebsocket::get_internal_server_with_client_senders(
+        address,
+        option,
+        client_senders().clone(),
+    )
+    .await;
     let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
 
     tokio::spawn(receive_server_handle_message(handle_message_receiver));
 }
 
 pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, String)>) {
-    while let Ok(message) = receiver.recv().await {
-        log::debug!("Message: {:?}", message);
+    while let Ok((data, peer)) = receiver.recv().await {
+        // log::debug!("Message: {:?}", message);
+
+        if let Ok(data) = Data::deserialize(&data) {
+            match Category::try_from(data.category as u32).unwrap() {
+                Category::AppStartup => {
+                    log::debug!("peer: {} {:?}", peer, data);
+                    let mut datas = vec![];
+                    AppStartupOutput { success: true }
+                        .serialize(&mut datas)
+                        .unwrap();
+                    client_senders()
+                        .send(
+                            peer,
+                            make_response_message(Category::AppStartupOutput, datas),
+                        )
+                        .await;
+                }
+                _ => {
+                    log::debug!("peer: {} Unknown category: {:?}", peer, data);
+                }
+            }
+        }
     }
 }
 
@@ -55,17 +93,18 @@ pub fn make_models() -> &'static Models {
     })
 }
 
-pub fn make_db(models: &'static Models, path: PathBuf) -> Database<'static> {
-    let mut db = None;
-    while db.is_none() {
-        match Builder::new().create(models, &path) {
-            Ok(database) => {
-                db = Some(database);
-            }
-            Err(error) => {
-                panic!("Failed to create db {error:?}");
-            }
-        }
-    }
-    db.unwrap()
+pub fn db() -> &'static Arc<RwLock<Database<'static>>> {
+    static BUILDER: OnceLock<Arc<RwLock<Database<'static>>>> = OnceLock::new();
+    BUILDER.get_or_init(|| {
+        Arc::new(RwLock::new(
+            Builder::new()
+                .create(&make_models(), get_db_path().unwrap())
+                .unwrap(),
+        ))
+    })
+}
+
+pub fn client_senders() -> &'static Arc<RwLock<ClientSenders>> {
+    static BUILDER: OnceLock<Arc<RwLock<ClientSenders>>> = OnceLock::new();
+    BUILDER.get_or_init(|| Arc::new(RwLock::new(ClientSenders::new())))
 }

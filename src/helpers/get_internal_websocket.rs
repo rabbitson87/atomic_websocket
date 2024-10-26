@@ -143,16 +143,14 @@ pub async fn handle_websocket(
 pub async fn get_id(db: Arc<RwLock<Database<'static>>>) -> String {
     let db = db.read().await;
     let reader = db.r_transaction().unwrap();
-    let data = reader.scan().primary::<Settings>().unwrap();
-    drop(reader);
-    let mut id: Option<String> = None;
-    for setting in data.all().unwrap() {
-        if let Ok(setting) = setting {
-            if setting.key == format!("{:?}", SaveKey::ClientId) {
-                id = Some(String::from_utf8(setting.value).unwrap().into());
-                break;
-            }
-        }
+
+    let mut return_string = String::new();
+    if let Some(data) = reader
+        .get()
+        .primary::<Settings>(format!("{:?}", SaveKey::ClientId))
+        .unwrap()
+    {
+        return_string = String::from_utf8(data.value).unwrap().into()
     }
-    id.unwrap()
+    return_string
 }

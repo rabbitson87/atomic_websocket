@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.1
+
+* Improve loop and db logic.
+
 ## 0.4.0
 
 * Add client and server with senders

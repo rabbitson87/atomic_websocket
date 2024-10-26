@@ -16,6 +16,7 @@ use native_db::Database;
 
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::RwLock;
+use tokio::time::{Instant, MissedTickBehavior};
 
 #[derive(Clone)]
 pub struct ClientOptions {
@@ -80,18 +81,12 @@ impl AtomicClient {
     pub async fn regist_id(&self, db: Arc<RwLock<Database<'static>>>) {
         let db = db.read().await;
         let reader = db.r_transaction().unwrap();
-        let data = reader.scan().primary::<Settings>().unwrap();
+        let data = reader
+            .get()
+            .primary::<Settings>(format!("{:?}", SaveKey::ClientId))
+            .unwrap();
         drop(reader);
-        let mut id: Option<String> = None;
-        for setting in data.all().unwrap() {
-            if let Ok(setting) = setting {
-                if setting.key == format!("{:?}", SaveKey::ClientId) {
-                    id = Some(String::from_utf8(setting.value).unwrap().into());
-                    break;
-                }
-            }
-        }
-        if id.is_none() {
+        if let None = data {
             use nanoid::nanoid;
             let writer = db.rw_transaction().unwrap();
             writer
@@ -120,8 +115,14 @@ async fn internal_ping_loop_cheker(
 ) {
     let retry_seconds = options.retry_seconds;
     let use_keep_ip = options.use_keep_ip;
+    let mut interval = tokio::time::interval_at(
+        Instant::now() + Duration::from_secs(retry_seconds),
+        Duration::from_secs(retry_seconds),
+    );
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
-        tokio::time::sleep(Duration::from_secs(retry_seconds)).await;
+        interval.tick().await;
         let server_sender_clone = server_sender.clone();
         let server_sender_clone = server_sender_clone.read().await;
         if server_sender_clone.server_received_times > 0
@@ -198,9 +199,16 @@ async fn internal_ping_loop_cheker(
 }
 
 async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, options: ClientOptions) {
+    let retry_seconds = options.retry_seconds;
     let use_keep_ip = options.use_keep_ip;
+    let mut interval = tokio::time::interval_at(
+        Instant::now() + Duration::from_secs(retry_seconds),
+        Duration::from_secs(retry_seconds),
+    );
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        interval.tick().await;
         let server_sender_clone = server_sender.clone();
         let server_sender_clone = server_sender_clone.read().await;
         if server_sender_clone.server_received_times + 90 < now().timestamp()

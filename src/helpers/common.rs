@@ -10,6 +10,8 @@ use crate::{
     Settings,
 };
 
+use super::traits::StringUtil;
+
 #[cfg(feature = "rinf")]
 #[cfg(not(feature = "debug"))]
 #[macro_export]
@@ -83,14 +85,7 @@ pub async fn get_setting_by_key(
     let db = db.read().await;
     let reader = db.r_transaction()?;
 
-    for setting in reader.scan().primary::<Settings>()?.all()? {
-        if let Ok(setting) = setting {
-            if &setting.key == &key {
-                return Ok(Some(setting));
-            };
-        }
-    }
-    Ok(None)
+    Ok(reader.get().primary::<Settings>(key)?)
 }
 
 pub async fn set_setting(
@@ -101,18 +96,10 @@ pub async fn set_setting(
     let reader = db.r_transaction()?;
     let writer = db.rw_transaction()?;
 
-    let list = reader.scan().primary::<Settings>()?;
+    let setting = reader
+        .get()
+        .primary::<Settings>(settings.key.copy_string())?;
     drop(reader);
-
-    let mut setting = None;
-    for setting_item in list.all()? {
-        if let Ok(setting_item) = setting_item {
-            if &setting_item.key == &settings.key {
-                setting = Some(setting_item);
-                break;
-            };
-        }
-    }
 
     match setting {
         Some(setting) => {

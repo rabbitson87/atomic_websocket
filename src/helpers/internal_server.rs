@@ -4,6 +4,7 @@ use tokio::{
     self,
     net::{TcpListener, TcpStream},
     sync::{broadcast, RwLock},
+    time::{Instant, MissedTickBehavior},
 };
 use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
 
@@ -68,8 +69,14 @@ impl AtomicServer {
 }
 
 pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
+    let mut interval = tokio::time::interval_at(
+        Instant::now() + Duration::from_secs(15),
+        Duration::from_secs(15),
+    );
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        interval.tick().await;
         let server_sender_clone = server_sender.clone();
         let mut server_sender_clone = server_sender_clone.write().await;
         server_sender_clone.check_client_send_time();

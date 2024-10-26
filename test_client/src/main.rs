@@ -9,7 +9,7 @@ use std::{
 use atomic_websocket::{
     common::{get_id, make_response_message},
     external::native_db::{Builder, Database, Models},
-    schema::{AppStartup, ServerConnectInfo},
+    schema::{AppStartup, Category, Data, ServerConnectInfo},
     server_sender::{ClientOptions, SenderStatus, ServerSender, ServerSenderTrait},
     AtomicWebsocket, Settings,
 };
@@ -53,15 +53,10 @@ async fn internal_client_start(port: &str) {
     let mut client_options = ClientOptions::default();
     client_options.retry_seconds = 2;
     client_options.use_keep_ip = true;
-    let server_sender = Arc::new(RwLock::new(ServerSender::new(
-        db().clone(),
-        "".into(),
-        client_options.clone(),
-    )));
     let atomic_client = AtomicWebsocket::get_internal_client_with_server_sender(
         db().clone(),
         client_options,
-        server_sender,
+        server_sender().clone(),
     )
     .await;
 
@@ -80,26 +75,6 @@ async fn internal_client_start(port: &str) {
             db().clone(),
         )
         .await;
-
-    let server_sender = atomic_client.server_sender.clone();
-
-    let id = get_id(db().clone()).await;
-    loop {
-        sleep(Duration::from_millis(200)).await;
-        let mut datas = vec![];
-        AppStartup {
-            id: &id,
-            app_type: 1,
-        }
-        .serialize(&mut datas)
-        .unwrap();
-        server_sender
-            .send(make_response_message(
-                atomic_websocket::schema::Category::AppStartup,
-                datas,
-            ))
-            .await;
-    }
 }
 
 pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
@@ -110,13 +85,51 @@ pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
         }
         if status == SenderStatus::Connected {
             log::debug!("Connected");
+            let id = get_id(db().clone()).await;
+            let mut datas = vec![];
+            AppStartup {
+                id: &id,
+                app_type: 1,
+            }
+            .serialize(&mut datas)
+            .unwrap();
+            server_sender()
+                .send(make_response_message(
+                    atomic_websocket::schema::Category::AppStartup,
+                    datas,
+                ))
+                .await;
         }
     }
 }
 
 pub async fn receive_handle_message(mut receiver: Receiver<Vec<u8>>) {
     while let Ok(message) = receiver.recv().await {
-        log::debug!("Message: {:?}", message);
+        if let Ok(data) = Data::deserialize(&message) {
+            match Category::try_from(data.category as u32).unwrap() {
+                Category::AppStartupOutput => {
+                    log::debug!("{:?}", data);
+                    sleep(Duration::from_secs(2)).await;
+                    let id = get_id(db().clone()).await;
+                    let mut datas = vec![];
+                    AppStartup {
+                        id: &id,
+                        app_type: 1,
+                    }
+                    .serialize(&mut datas)
+                    .unwrap();
+                    server_sender()
+                        .send(make_response_message(
+                            atomic_websocket::schema::Category::AppStartup,
+                            datas,
+                        ))
+                        .await;
+                }
+                _ => {
+                    log::debug!("Unknown category: {:?}", data);
+                }
+            }
+        }
     }
 }
 
@@ -145,5 +158,16 @@ pub fn db() -> &'static Arc<RwLock<Database<'static>>> {
                 .create(&make_models(), get_db_path().unwrap())
                 .unwrap(),
         ))
+    })
+}
+
+pub fn server_sender() -> &'static Arc<RwLock<ServerSender>> {
+    static BUILDER: OnceLock<Arc<RwLock<ServerSender>>> = OnceLock::new();
+    BUILDER.get_or_init(|| {
+        Arc::new(RwLock::new(ServerSender::new(
+            db().clone(),
+            "".into(),
+            ClientOptions::default(),
+        )))
     })
 }

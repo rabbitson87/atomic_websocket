@@ -105,7 +105,6 @@ impl ServerSender {
                     log_error!("Error server sending message: {:?}", e);
                     self.send_status(SenderStatus::Disconnected);
 
-                    let mut send_result = false;
                     let mut count = 0;
                     let limit_count = match self.options.retry_seconds > 5 {
                         true => 5,
@@ -114,11 +113,11 @@ impl ServerSender {
                             _ => self.options.retry_seconds - 1,
                         },
                     };
-                    while send_result == false {
+                    loop {
                         let sender = sx.clone();
                         match sender.send(message.clone()).await {
                             Ok(_) => {
-                                send_result = true;
+                                break;
                             }
                             Err(e) => {
                                 drop(sender);

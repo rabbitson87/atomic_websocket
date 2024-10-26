@@ -89,18 +89,17 @@ impl ClientSenders {
         for client in self.lists.iter_mut() {
             if client.peer == peer {
                 let sender = client.sx.clone();
-                let mut is_send = false;
                 let mut count = 0;
-                while is_send == false {
+                loop {
                     match sender.send(message.clone()).await {
                         Ok(_) => {
-                            is_send = true;
                             client.write_time();
+                            break;
                         }
                         Err(e) => {
                             if count > 5 {
-                                result = false;
                                 drop(sender);
+                                result = false;
                                 break;
                             }
                             log_error!("Error client sending message: {:?}", e);
