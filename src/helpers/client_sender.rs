@@ -112,6 +112,9 @@ impl ClientSenders {
         }
         result
     }
+    pub fn is_active(&self, peer: String) -> bool {
+        self.lists.iter().any(|x| x.peer == peer)
+    }
 }
 
 #[async_trait]
@@ -121,6 +124,7 @@ pub trait ClientSendersTrait {
     async fn send_handle_message(&self, data: Data<'_>, peer: String);
     async fn send(&self, peer: String, message: Message);
     async fn expire_send(&self, peer_list: Vec<String>);
+    async fn is_active(&self, peer: String) -> bool;
 }
 
 #[async_trait]
@@ -166,6 +170,11 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
                     .await;
             }
         }
+    }
+    async fn is_active(&self, peer: String) -> bool {
+        let clone = self.clone();
+        let clone = clone.read().await;
+        clone.is_active(peer)
     }
 }
 

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.2
+
+* Add is_active for clientSender.
+
 ## 0.4.1
 
 * Improve loop and db logic.
