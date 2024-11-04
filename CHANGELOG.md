@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.4
+
+* Add import binary from text message.
+
 ## 0.4.3
 
 * Fixed duplicated connect and infinite connection, improve logic.
