@@ -9,10 +9,7 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    helpers::{
-        common::make_disconnect_message,
-        traits::{date_time::now, StringUtil},
-    },
+    helpers::{common::make_disconnect_message, traits::date_time::now},
     log_debug, log_error,
     schema::Data,
 };
@@ -34,7 +31,7 @@ impl ClientSenders {
         }
     }
 
-    pub async fn add(&mut self, peer: String, sx: Sender<Message>) {
+    pub async fn add(&mut self, peer: &str, sx: Sender<Message>) {
         let list = self.lists.iter().position(|x| x.peer == peer);
         log_debug!("Add peer: {:?}, list: {:?}", peer, list);
         match list {
@@ -44,7 +41,7 @@ impl ClientSenders {
                 list.sx = sx;
             }
             None => self.lists.push(ClientSender {
-                peer,
+                peer: peer.into(),
                 sx,
                 send_time: 0,
             }),
@@ -55,9 +52,9 @@ impl ClientSenders {
         self.handle_message_sx.subscribe()
     }
 
-    pub fn send_handle_message(&self, data: Vec<u8>, peer: String) {
+    pub fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
         let handle_message_sx = self.handle_message_sx.clone();
-        let _ = handle_message_sx.send((data, peer));
+        let _ = handle_message_sx.send((data, peer.into()));
     }
 
     pub fn check_client_send_time(&mut self) {
@@ -73,7 +70,7 @@ impl ClientSenders {
         }
     }
 
-    pub fn remove(&mut self, peer: String) {
+    pub fn remove(&mut self, peer: &str) {
         let list = self.lists.iter().position(|x| x.peer == peer);
         log_debug!("Remove peer: {:?}, list: {:?}", peer, list);
         match list {
@@ -84,7 +81,7 @@ impl ClientSenders {
         };
     }
 
-    pub async fn send(&mut self, peer: String, message: Message) -> bool {
+    pub async fn send(&mut self, peer: &str, message: Message) -> bool {
         let mut result = true;
         for client in self.lists.iter_mut() {
             if client.peer == peer {
@@ -112,69 +109,55 @@ impl ClientSenders {
         }
         result
     }
-    pub fn is_active(&self, peer: String) -> bool {
+    pub fn is_active(&self, peer: &str) -> bool {
         self.lists.iter().any(|x| x.peer == peer)
     }
 }
 
 #[async_trait]
 pub trait ClientSendersTrait {
-    async fn add(&self, peer: String, sx: Sender<Message>);
+    async fn add(&self, peer: &str, sx: Sender<Message>);
     async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)>;
-    async fn send_handle_message(&self, data: Data<'_>, peer: String);
-    async fn send(&self, peer: String, message: Message);
+    async fn send_handle_message(&self, data: Data<'_>, peer: &str);
+    async fn send(&self, peer: &str, message: Message);
     async fn expire_send(&self, peer_list: Vec<String>);
-    async fn is_active(&self, peer: String) -> bool;
+    async fn is_active(&self, peer: &str) -> bool;
 }
 
 #[async_trait]
 impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
-    async fn add(&self, peer: String, sx: Sender<Message>) {
-        let clone = self.clone();
-        clone.write().await.add(peer, sx).await;
-        drop(clone);
+    async fn add(&self, peer: &str, sx: Sender<Message>) {
+        self.write().await.add(peer, sx).await;
     }
 
     async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)> {
-        let clone = self.read().await;
-        clone.get_handle_message_receiver()
+        self.read().await.get_handle_message_receiver()
     }
 
-    async fn send_handle_message(&self, data: Data<'_>, peer: String) {
-        let clone = self.clone();
-
+    async fn send_handle_message(&self, data: Data<'_>, peer: &str) {
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
-        let _ = clone.write().await.send_handle_message(buf, peer);
-        drop(clone);
+        self.write().await.send_handle_message(buf, peer);
     }
 
-    async fn send(&self, peer: String, message: Message) {
-        let clone = self.clone();
-        let mut clone = clone.write().await;
-        let result = clone.send(peer.copy_string(), message).await;
+    async fn send(&self, peer: &str, message: Message) {
+        let mut clone = self.write().await;
+        let result = clone.send(peer, message).await;
 
         if result == false {
             clone.remove(peer);
         }
-        drop(clone);
     }
 
     async fn expire_send(&self, peer_list: Vec<String>) {
-        let clone = self.clone();
-        let lists = &clone.read().await.lists.clone();
-        drop(clone);
-        for peer in lists {
+        for peer in self.read().await.lists.iter() {
             if !peer_list.contains(&peer.peer) {
-                self.send(peer.peer.copy_string(), make_expired_output_message())
-                    .await;
+                self.send(&peer.peer, make_expired_output_message()).await;
             }
         }
     }
-    async fn is_active(&self, peer: String) -> bool {
-        let clone = self.clone();
-        let clone = clone.read().await;
-        clone.is_active(peer)
+    async fn is_active(&self, peer: &str) -> bool {
+        self.read().await.is_active(peer)
     }
 }
 

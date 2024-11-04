@@ -41,6 +41,7 @@ pub struct ServerSender {
     status_sx: Sender<SenderStatus>,
     handle_message_sx: Sender<Vec<u8>>,
     pub options: ClientOptions,
+    pub connect_list: Vec<String>,
 }
 
 impl ServerSender {
@@ -60,6 +61,7 @@ impl ServerSender {
             status_sx,
             handle_message_sx,
             options,
+            connect_list: vec![],
         }
     }
     pub fn get_status_receiver(&self) -> Receiver<SenderStatus> {
@@ -71,7 +73,7 @@ impl ServerSender {
     pub fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
         self.server_sender = Some(server_sender);
     }
-    pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: String) {
+    pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: &str) {
         if self.sx.is_some() {
             let sender = self.sx.clone().unwrap();
             let server_ip = self.server_ip.copy_string();
@@ -82,10 +84,10 @@ impl ServerSender {
             self.sx = None;
         }
         self.sx = Some(sx);
-        self.server_ip = server_ip;
+        self.server_ip = server_ip.into();
     }
-    pub fn change_ip(&mut self, server_ip: String) {
-        self.server_ip = server_ip;
+    pub fn change_ip(&mut self, server_ip: &str) {
+        self.server_ip = server_ip.into();
     }
     pub fn send_status(&self, status: SenderStatus) {
         let status_sx = self.status_sx.clone();
@@ -144,7 +146,7 @@ impl ServerSender {
 
 #[async_trait]
 pub trait ServerSenderTrait {
-    async fn add(&self, sx: mpsc::Sender<Message>, server_ip: String);
+    async fn add(&self, sx: mpsc::Sender<Message>, server_ip: &str);
     async fn send_status(&self, status: SenderStatus);
     async fn send_handle_message(&self, data: Data<'_>);
     async fn get_status_receiver(&self) -> Receiver<SenderStatus>;
@@ -153,96 +155,99 @@ pub trait ServerSenderTrait {
     async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>);
     async fn is_valid_server_ip(&self) -> bool;
     async fn get_server_ip(&self) -> String;
-    async fn change_ip(&self, server_ip: String);
+    async fn change_ip(&self, server_ip: &str);
+    async fn change_ip_if_valid_server_ip(&self, server_ip: &str);
     async fn write_received_times(&self);
+    async fn is_connect_list(&self, server_ip: &str) -> bool;
+    async fn add_connect_list(&self, server_ip: &str);
+    async fn remove_connect_list(&self, server_ip: &str);
+    async fn is_start_connect(&self, server_ip: &str) -> bool;
 }
 
 #[async_trait]
 impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
-    async fn add(&self, sx: mpsc::Sender<Message>, server_ip: String) {
+    async fn add(&self, sx: mpsc::Sender<Message>, server_ip: &str) {
         let mut clone = self.write().await;
-        clone.add(sx, server_ip.copy_string());
+        clone.add(sx, server_ip.into());
+        let db = clone.db.clone();
+        drop(clone);
 
         log_debug!("set start server_ip: {:?}", server_ip);
-        let server_connect_info = match get_setting_by_key(
-            clone.db.clone(),
-            format!("{:?}", SaveKey::ServerConnectInfo),
-        )
-        .await
-        {
-            Ok(server_connect_info) => server_connect_info,
-            Err(error) => {
-                log_debug!("Failed to get server_connect_info {error:?}");
-                None
-            }
-        };
+        let server_connect_info =
+            match get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await
+            {
+                Ok(server_connect_info) => server_connect_info,
+                Err(error) => {
+                    log_debug!("Failed to get server_connect_info {error:?}");
+                    None
+                }
+            };
+        let db = db.read().await;
+        let writer = db.rw_transaction().unwrap();
         match server_connect_info {
-            Some(data) => {
-                let mut data = ServerConnectInfo::deserialize(&data.value).unwrap();
-
-                let mut before_value = Vec::new();
-                data.serialize(&mut before_value).unwrap();
+            Some(before_data) => {
+                let mut data = ServerConnectInfo::deserialize(&before_data.value).unwrap();
 
                 data.server_ip = &server_ip;
                 let mut value = Vec::new();
                 data.serialize(&mut value).unwrap();
 
-                let db = clone.db.read().await;
-                let writer = db.rw_transaction().unwrap();
                 writer
                     .update::<Settings>(
-                        Settings {
-                            key: format!("{:?}", SaveKey::ServerConnectInfo),
-                            value: before_value,
-                        },
+                        before_data,
                         Settings {
                             key: format!("{:?}", SaveKey::ServerConnectInfo),
                             value,
                         },
                     )
                     .unwrap();
-                writer.commit().unwrap();
-                drop(db);
             }
-            None => {}
+            None => {
+                let mut value = Vec::new();
+                let data = ServerConnectInfo {
+                    server_ip,
+                    port: match server_ip.contains(":") {
+                        true => server_ip.split(":").nth(1).unwrap(),
+                        false => "",
+                    },
+                };
+
+                data.serialize(&mut value).unwrap();
+                writer
+                    .insert::<Settings>(Settings {
+                        key: format!("{:?}", SaveKey::ServerConnectInfo),
+                        value,
+                    })
+                    .unwrap();
+            }
         }
+        writer.commit().unwrap();
     }
 
     async fn get_status_receiver(&self) -> Receiver<SenderStatus> {
-        let clone = self.read().await;
-        clone.get_status_receiver()
+        self.read().await.get_status_receiver()
     }
 
     async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>> {
-        let clone = self.read().await;
-        clone.get_handle_message_receiver()
+        self.read().await.get_handle_message_receiver()
     }
 
     async fn send_status(&self, status: SenderStatus) {
-        let clone = self.clone();
-        clone.read().await.send_status(status);
-        drop(clone);
+        self.read().await.send_status(status);
     }
 
     async fn send_handle_message(&self, data: Data<'_>) {
-        let clone = self.clone();
-
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
-        let _ = clone.write().await.send_handle_message(buf);
-        drop(clone);
+        self.write().await.send_handle_message(buf);
     }
 
     async fn send(&self, message: Message) {
-        let clone = self.clone();
-        clone.write().await.send(message).await;
-        drop(clone);
+        self.write().await.send(message).await;
     }
 
     async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
-        let clone = self.clone();
-        clone.write().await.regist(server_sender);
-        drop(clone);
+        self.write().await.regist(server_sender);
     }
 
     async fn is_valid_server_ip(&self) -> bool {
@@ -272,15 +277,70 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
             .into()
     }
 
-    async fn change_ip(&self, server_ip: String) {
-        let mut clone = self.write().await;
-        clone.change_ip(server_ip);
-        drop(clone);
+    async fn change_ip(&self, server_ip: &str) {
+        self.write().await.change_ip(server_ip);
+    }
+
+    async fn change_ip_if_valid_server_ip(&self, server_ip: &str) {
+        let db = self.read().await.db.clone();
+        let server_connect_info =
+            match get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await
+            {
+                Ok(server_connect_info) => server_connect_info,
+                Err(error) => {
+                    log_error!("Failed to get server_connect_info {error:?}");
+                    None
+                }
+            };
+        if let Some(server_connect_info) = server_connect_info {
+            let mut info = ServerConnectInfo::deserialize(&server_connect_info.value).unwrap();
+
+            if info.server_ip == server_ip {
+                self.change_ip("".into()).await;
+                info.server_ip = "".into();
+                let mut value = Vec::new();
+                info.serialize(&mut value).unwrap();
+                let db = db.read().await;
+                let writer = db.rw_transaction().unwrap();
+                writer
+                    .update::<Settings>(
+                        server_connect_info,
+                        Settings {
+                            key: format!("{:?}", SaveKey::ServerConnectInfo),
+                            value,
+                        },
+                    )
+                    .unwrap();
+                writer.commit().unwrap();
+            }
+        }
     }
 
     async fn write_received_times(&self) {
-        let mut clone = self.write().await;
-        clone.server_received_times = now().timestamp();
-        drop(clone);
+        self.write().await.server_received_times = now().timestamp();
+    }
+
+    async fn is_connect_list(&self, server_ip: &str) -> bool {
+        self.read()
+            .await
+            .connect_list
+            .iter()
+            .any(|x| x == server_ip)
+    }
+
+    async fn add_connect_list(&self, server_ip: &str) {
+        self.write().await.connect_list.push(server_ip.into());
+    }
+
+    async fn remove_connect_list(&self, server_ip: &str) {
+        self.write().await.connect_list.retain(|x| x != server_ip);
+    }
+
+    async fn is_start_connect(&self, server_ip: &str) -> bool {
+        if self.is_connect_list(server_ip).await {
+            return false;
+        }
+        self.add_connect_list(server_ip).await;
+        true
     }
 }

@@ -21,6 +21,8 @@ use tokio::{
 
 #[tokio::main]
 async fn main() {
+    std::fs::write(current_dir().unwrap().join("log/debug.log"), vec![]).unwrap();
+
     let config_str = include_str!("log_config.yml");
     let config = serde_yaml::from_str(config_str).unwrap();
     log4rs::init_raw_config(config).unwrap();
@@ -28,6 +30,7 @@ async fn main() {
     let port = "9000";
     let address: String = format!("0.0.0.0:{}", port);
 
+    log::debug!("Starting server on {}", address);
     tokio::spawn(server_start(address.clone()));
 
     loop {
@@ -63,7 +66,7 @@ pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, Stri
                         .unwrap();
                     client_senders()
                         .send(
-                            peer,
+                            &peer,
                             make_response_message(Category::AppStartupOutput, datas),
                         )
                         .await;

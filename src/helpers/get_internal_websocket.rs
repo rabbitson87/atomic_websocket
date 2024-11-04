@@ -44,17 +44,27 @@ pub async fn get_internal_websocket(
     server_ip: String,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    log_debug!("Connecting to {}", server_ip);
-    if let Ok((ws_stream, _)) = connect_async(&server_ip).await {
-        handle_websocket(
-            db,
-            server_sender,
-            options,
-            server_ip.copy_string(),
-            ws_stream,
-        )
-        .await?;
+    if !server_sender.is_start_connect(&server_ip).await {
+        return Ok(());
     }
+    log_debug!("Connecting to {}", server_ip);
+    match connect_async(&server_ip).await {
+        Ok((ws_stream, _)) => {
+            handle_websocket(
+                db,
+                server_sender.clone(),
+                options,
+                server_ip.copy_string(),
+                ws_stream,
+            )
+            .await?
+        }
+        Err(e) => {
+            server_sender.change_ip_if_valid_server_ip(&server_ip).await;
+            log_error!("Error connecting to {}: {:?}", server_ip, e);
+        }
+    }
+    server_sender.remove_connect_list(&server_ip).await;
     log_debug!("Failed to server connect to {}", server_ip);
     Ok(())
 }
@@ -70,9 +80,8 @@ pub async fn handle_websocket(
     log_debug!("Connected to {} for web socket", server_ip);
 
     let (sx, mut rx) = mpsc::channel(8);
-    let server_ip = server_ip.copy_string();
     let id = get_id(db.clone()).await;
-    server_sender.add(sx.clone(), server_ip).await;
+    server_sender.add(sx.clone(), &server_ip).await;
 
     if options.use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
@@ -81,6 +90,7 @@ pub async fn handle_websocket(
 
     let retry_seconds = options.retry_seconds;
     let mut is_first = true;
+    let server_sender_clone = server_sender.clone();
     tokio::spawn(async move {
         let is_wait_ping = Arc::new(Mutex::new(false));
         while let Some(Ok(Message::Binary(value))) = istream.next().await {
@@ -90,16 +100,20 @@ pub async fn handle_websocket(
                 if data.category == Category::Pong as u16 {
                     if is_first {
                         is_first = false;
-                        server_sender.send_status(SenderStatus::Connected).await;
+                        server_sender_clone
+                            .send_status(SenderStatus::Connected)
+                            .await;
                     }
                     if !is_wait_ping.is_wait_ping().await {
                         is_wait_ping.set_wait_ping(true).await;
-                        server_sender.write_received_times().await;
-                        let server_sender_clone = server_sender.clone();
+                        server_sender_clone.write_received_times().await;
+                        let server_sender_clone2 = server_sender_clone.clone();
                         let is_wait_ping_clone = is_wait_ping.clone();
                         tokio::spawn(async move {
                             sleep(Duration::from_secs(retry_seconds)).await;
-                            server_sender_clone.send(make_ping_message(&id_clone)).await;
+                            server_sender_clone2
+                                .send(make_ping_message(&id_clone))
+                                .await;
                             is_wait_ping_clone.set_wait_ping(false).await;
                         });
                     }
@@ -107,12 +121,12 @@ pub async fn handle_websocket(
                 } else if data.category == Category::Disconnect as u16 {
                     let _ = sx
                         .send(make_disconnect_message(
-                            &server_sender.get_server_ip().await,
+                            &server_sender_clone.get_server_ip().await,
                         ))
                         .await;
                     break;
                 }
-                server_sender.send_handle_message(data).await;
+                server_sender_clone.send_handle_message(data).await;
             }
         }
     });
@@ -136,6 +150,7 @@ pub async fn handle_websocket(
         }
     }
     log_debug!("WebSocket closed");
+    server_sender.remove_connect_list(&server_ip).await;
     ostream.flush().await?;
     Ok(())
 }

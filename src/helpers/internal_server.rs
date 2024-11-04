@@ -12,7 +12,6 @@ use crate::{
     helpers::{
         client_sender::ClientSendersTrait,
         common::{make_disconnect_message, make_pong_message},
-        traits::StringUtil,
     },
     log_debug, log_error,
     schema::{Category, Data, Ping},
@@ -164,9 +163,7 @@ pub async fn handle_connection(
                                         sx.send(make_disconnect_message(&peer.to_string())).await;
                                     break;
                                 }
-                                client_senders
-                                    .send_handle_message(data, id.copy_string())
-                                    .await;
+                                client_senders.send_handle_message(data, &id).await;
                             }
                         }
                     }
@@ -211,19 +208,17 @@ async fn get_id_from_first_message(
                 log_debug!("receive ping from client: {:?}", data);
                 if let Ok(ping) = Ping::deserialize(&data.datas) {
                     _id = Some(ping.peer.into());
-                    client_senders
-                        .add(_id.as_ref().unwrap().copy_string(), sx)
-                        .await;
+                    client_senders.add(&_id.as_ref().unwrap(), sx).await;
                     if options.use_ping {
                         client_senders
-                            .send(_id.as_ref().unwrap().copy_string(), make_pong_message())
+                            .send(&_id.as_ref().unwrap(), make_pong_message())
                             .await;
                     } else {
                         if options.proxy_ping > 0 {
                             data.category = options.proxy_ping as u16;
                         }
                         client_senders
-                            .send_handle_message(data, _id.as_ref().unwrap().copy_string())
+                            .send_handle_message(data, &_id.as_ref().unwrap())
                             .await;
                     }
                 }

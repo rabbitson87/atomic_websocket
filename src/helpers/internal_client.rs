@@ -259,7 +259,7 @@ pub async fn get_outer_connect(
     log_debug!("server_connect_info: {:?}", server_connect_info);
 
     if !options.url.is_empty() {
-        server_sender.change_ip(options.url.copy_string()).await;
+        server_sender.change_ip(&options.url).await;
     }
 
     if options.url.is_empty() && !server_sender.is_valid_server_ip().await {

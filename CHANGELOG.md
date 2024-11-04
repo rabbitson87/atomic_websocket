@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.3
+
+* Fixed duplicated connect and infinite connection, improve logic.
+
 ## 0.4.2
 
 * Add is_active for clientSender.

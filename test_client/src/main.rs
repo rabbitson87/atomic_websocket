@@ -21,6 +21,8 @@ use tokio::{
 
 #[tokio::main]
 async fn main() {
+    std::fs::write(current_dir().unwrap().join("log/debug.log"), vec![]).unwrap();
+
     let config_str = include_str!("log_config.yml");
     let config = serde_yaml::from_str(config_str).unwrap();
     log4rs::init_raw_config(config).unwrap();
