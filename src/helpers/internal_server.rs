@@ -11,10 +11,10 @@ use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
 use crate::{
     helpers::{
         client_sender::ClientSendersTrait,
-        common::{make_disconnect_message, make_pong_message},
+        common::{get_data_schema, make_disconnect_message, make_pong_message},
     },
     log_debug, log_error,
-    schema::{Category, Data, Ping},
+    schema::{Category, Ping},
 };
 use bebop::Record;
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
@@ -150,22 +150,20 @@ pub async fn handle_connection(
                     Some(id) => {
                         while let Some(Ok(message)) = istream.next().await {
                             let value = message.into_data();
-                            if let Ok(data) = Data::deserialize(&value) {
-                                if data.category == Category::Ping as u16 && use_ping {
-                                    if let Ok(data) = Ping::deserialize(&data.datas) {
-                                        client_senders
-                                            .send(data.peer.into(), make_pong_message())
-                                            .await;
-                                        continue;
-                                    }
+                            let data = get_data_schema(&value);
+                            if data.category == Category::Ping as u16 && use_ping {
+                                if let Ok(data) = Ping::deserialize(&data.datas) {
+                                    client_senders
+                                        .send(data.peer.into(), make_pong_message())
+                                        .await;
+                                    continue;
                                 }
-                                if data.category == Category::Disconnect as u16 {
-                                    let _ =
-                                        sx.send(make_disconnect_message(&peer.to_string())).await;
-                                    break;
-                                }
-                                client_senders.send_handle_message(data, &id).await;
                             }
+                            if data.category == Category::Disconnect as u16 {
+                                let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
+                                break;
+                            }
+                            client_senders.send_handle_message(data, &id).await;
                         }
                     }
                     None => {
@@ -177,12 +175,11 @@ pub async fn handle_connection(
             while let Some(message) = rx.recv().await {
                 ostream.send(message.clone()).await?;
                 let data = message.into_data();
-                if let Ok(data) = Data::deserialize(&data) {
-                    log_debug!("Server sending message: {:?}", data);
-                    if data.category == Category::Disconnect as u16 {
-                        rx.close();
-                        break;
-                    }
+                let data = get_data_schema(&data);
+                log_debug!("Server sending message: {:?}", data);
+                if data.category == Category::Disconnect as u16 {
+                    rx.close();
+                    break;
                 }
             }
             log_debug!("client: {} disconnected", peer);
@@ -206,24 +203,23 @@ async fn get_id_from_first_message(
     if let Some(Ok(message)) = istream.next().await {
         log_debug!("receive first message from client: {:?}", message);
         let value = message.into_data();
-        if let Ok(mut data) = Data::deserialize(&value) {
-            if data.category == Category::Ping as u16 {
-                log_debug!("receive ping from client: {:?}", data);
-                if let Ok(ping) = Ping::deserialize(&data.datas) {
-                    _id = Some(ping.peer.into());
-                    client_senders.add(&_id.as_ref().unwrap(), sx).await;
-                    if options.use_ping {
-                        client_senders
-                            .send(&_id.as_ref().unwrap(), make_pong_message())
-                            .await;
-                    } else {
-                        if options.proxy_ping > 0 {
-                            data.category = options.proxy_ping as u16;
-                        }
-                        client_senders
-                            .send_handle_message(data, &_id.as_ref().unwrap())
-                            .await;
+        let mut data = get_data_schema(&value);
+        if data.category == Category::Ping as u16 {
+            log_debug!("receive ping from client: {:?}", data);
+            if let Ok(ping) = Ping::deserialize(&data.datas) {
+                _id = Some(ping.peer.into());
+                client_senders.add(&_id.as_ref().unwrap(), sx).await;
+                if options.use_ping {
+                    client_senders
+                        .send(&_id.as_ref().unwrap(), make_pong_message())
+                        .await;
+                } else {
+                    if options.proxy_ping > 0 {
+                        data.category = options.proxy_ping as u16;
                     }
+                    client_senders
+                        .send_handle_message(data, &_id.as_ref().unwrap())
+                        .await;
                 }
             }
         }

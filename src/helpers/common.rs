@@ -1,6 +1,6 @@
 use std::{error::Error, sync::Arc};
 
-use bebop::{Record, SliceWrapper};
+use bebop::Record;
 use native_db::Database;
 use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
@@ -125,15 +125,22 @@ pub fn make_ping_message(peer: &str) -> Message {
     make_response_message(Category::Ping, datas)
 }
 
-pub fn make_response_message(category: Category, datas: Vec<u8>) -> Message {
-    let mut result = Vec::new();
+pub fn get_data_schema(data: &[u8]) -> Data<'_> {
     Data {
-        category: category as u16,
-        datas: SliceWrapper::from_raw(&datas),
+        category: data[0] as u16 + data[1] as u16 * 256,
+        datas: bebop::SliceWrapper::from_raw(&data[2..]),
     }
-    .serialize(&mut result)
-    .unwrap();
-    Message::Binary(result)
+}
+
+pub fn make_response_message(category: Category, mut datas: Vec<u8>) -> Message {
+    let mut byte = {
+        let category = category as u16;
+        let quotient = category / 256;
+        let remainder = category % 256;
+        vec![remainder as u8, quotient as u8]
+    };
+    byte.append(&mut datas);
+    Message::Binary(byte)
 }
 
 pub fn make_disconnect_message(peer: &str) -> Message {

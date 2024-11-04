@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bebop::Record;
 use futures_util::{SinkExt, StreamExt};
 use native_db::Database;
 use std::time::Duration;
@@ -9,12 +8,12 @@ use tokio::{
     sync::{mpsc, Mutex, RwLock},
     time::sleep,
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::{
-    generated::schema::{Category, Data, SaveKey},
+    generated::schema::{Category, SaveKey},
     helpers::{
-        common::{make_disconnect_message, make_ping_message},
+        common::{get_data_schema, make_disconnect_message, make_ping_message},
         server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
         traits::{ping::PingCheck, StringUtil},
     },
@@ -93,41 +92,42 @@ pub async fn handle_websocket(
     let server_sender_clone = server_sender.clone();
     tokio::spawn(async move {
         let is_wait_ping = Arc::new(Mutex::new(false));
-        while let Some(Ok(Message::Binary(value))) = istream.next().await {
-            if let Ok(data) = Data::deserialize(&value) {
-                let id_clone = id.copy_string();
-                log_debug!("Client receive message: {:?}", data);
-                if data.category == Category::Pong as u16 {
-                    if is_first {
-                        is_first = false;
-                        server_sender_clone
-                            .send_status(SenderStatus::Connected)
-                            .await;
-                    }
-                    if !is_wait_ping.is_wait_ping().await {
-                        is_wait_ping.set_wait_ping(true).await;
-                        server_sender_clone.write_received_times().await;
-                        let server_sender_clone2 = server_sender_clone.clone();
-                        let is_wait_ping_clone = is_wait_ping.clone();
-                        tokio::spawn(async move {
-                            sleep(Duration::from_secs(retry_seconds)).await;
-                            server_sender_clone2
-                                .send(make_ping_message(&id_clone))
-                                .await;
-                            is_wait_ping_clone.set_wait_ping(false).await;
-                        });
-                    }
-                    continue;
-                } else if data.category == Category::Disconnect as u16 {
-                    let _ = sx
-                        .send(make_disconnect_message(
-                            &server_sender_clone.get_server_ip().await,
-                        ))
+        while let Some(Ok(message)) = istream.next().await {
+            let value = message.into_data();
+            let data = get_data_schema(&value);
+
+            let id_clone = id.copy_string();
+            log_debug!("Client receive message: {:?}", data);
+            if data.category == Category::Pong as u16 {
+                if is_first {
+                    is_first = false;
+                    server_sender_clone
+                        .send_status(SenderStatus::Connected)
                         .await;
-                    break;
                 }
-                server_sender_clone.send_handle_message(data).await;
+                if !is_wait_ping.is_wait_ping().await {
+                    is_wait_ping.set_wait_ping(true).await;
+                    server_sender_clone.write_received_times().await;
+                    let server_sender_clone2 = server_sender_clone.clone();
+                    let is_wait_ping_clone = is_wait_ping.clone();
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(retry_seconds)).await;
+                        server_sender_clone2
+                            .send(make_ping_message(&id_clone))
+                            .await;
+                        is_wait_ping_clone.set_wait_ping(false).await;
+                    });
+                }
+                continue;
+            } else if data.category == Category::Disconnect as u16 {
+                let _ = sx
+                    .send(make_disconnect_message(
+                        &server_sender_clone.get_server_ip().await,
+                    ))
+                    .await;
+                break;
             }
+            server_sender_clone.send_handle_message(data).await;
         }
     });
 
@@ -135,12 +135,11 @@ pub async fn handle_websocket(
         match ostream.send(message.clone()).await {
             Ok(_) => {
                 let data = message.into_data();
-                if let Ok(data) = Data::deserialize(&data) {
-                    log_debug!("Send message: {:?}", data);
-                    if data.category == Category::Disconnect as u16 {
-                        rx.close();
-                        break;
-                    }
+                let data = get_data_schema(&data);
+                log_debug!("Send message: {:?}", data);
+                if data.category == Category::Disconnect as u16 {
+                    rx.close();
+                    break;
                 }
             }
             Err(e) => {

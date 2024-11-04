@@ -10,7 +10,7 @@ use atomic_websocket::{
     client_sender::{ClientSenders, ClientSendersTrait, ServerOptions},
     common::make_response_message,
     external::native_db::{Builder, Database, Models},
-    schema::{AppStartupOutput, Category, Data},
+    schema::{AppStartup, AppStartupOutput, Category, Data},
     AtomicWebsocket, Settings,
 };
 use bebop::Record;
@@ -60,6 +60,10 @@ pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, Stri
             match Category::try_from(data.category as u32).unwrap() {
                 Category::AppStartup => {
                     log::debug!("peer: {} {:?}", peer, data);
+                    log::debug!(
+                        "AppStartup: {:?}",
+                        AppStartup::deserialize(&data.datas).unwrap()
+                    );
                     let mut datas = vec![];
                     AppStartupOutput { success: true }
                         .serialize(&mut datas)

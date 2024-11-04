@@ -9,7 +9,7 @@ use std::{
 use atomic_websocket::{
     common::{get_id, make_response_message},
     external::native_db::{Builder, Database, Models},
-    schema::{AppStartup, Category, Data, ServerConnectInfo},
+    schema::{AppStartup, AppStartupOutput, Category, Data, ServerConnectInfo},
     server_sender::{ClientOptions, SenderStatus, ServerSender, ServerSenderTrait},
     AtomicWebsocket, Settings,
 };
@@ -111,6 +111,10 @@ pub async fn receive_handle_message(mut receiver: Receiver<Vec<u8>>) {
             match Category::try_from(data.category as u32).unwrap() {
                 Category::AppStartupOutput => {
                     log::debug!("{:?}", data);
+                    log::debug!(
+                        "AppStartupOutput: {:?}",
+                        AppStartupOutput::deserialize(&data.datas).unwrap()
+                    );
                     sleep(Duration::from_secs(2)).await;
                     let id = get_id(db().clone()).await;
                     let mut datas = vec![];

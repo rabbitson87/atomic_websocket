@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.0
+
+* Convert import message for any language.
+
 ## 0.4.5
 
 * Add import binary from all message.
