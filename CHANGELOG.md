@@ -1,5 +1,9 @@
 # Changes
 
+## 0.4.5
+
+* Add import binary from all message.
+
 ## 0.4.4
 
 * Add import binary from text message.

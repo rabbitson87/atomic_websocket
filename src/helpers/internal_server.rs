@@ -149,7 +149,7 @@ pub async fn handle_connection(
                 match id {
                     Some(id) => {
                         while let Some(Ok(message)) = istream.next().await {
-                            let value = get_binary_message(message);
+                            let value = message.into_data();
                             if let Ok(data) = Data::deserialize(&value) {
                                 if data.category == Category::Ping as u16 && use_ping {
                                     if let Ok(data) = Ping::deserialize(&data.datas) {
@@ -196,16 +196,6 @@ pub async fn handle_connection(
     Ok(())
 }
 
-fn get_binary_message(message: Message) -> Vec<u8> {
-    if message.is_binary() {
-        message.into_data()
-    } else if message.is_text() {
-        message.into_data()
-    } else {
-        vec![]
-    }
-}
-
 async fn get_id_from_first_message(
     istream: &mut SplitStream<WebSocketStream<TcpStream>>,
     client_senders: Arc<RwLock<ClientSenders>>,
@@ -214,7 +204,8 @@ async fn get_id_from_first_message(
 ) -> Option<String> {
     let mut _id: Option<String> = None;
     if let Some(Ok(message)) = istream.next().await {
-        let value = get_binary_message(message);
+        log_debug!("receive first message from client: {:?}", message);
+        let value = message.into_data();
         if let Ok(mut data) = Data::deserialize(&value) {
             if data.category == Category::Ping as u16 {
                 log_debug!("receive ping from client: {:?}", data);
