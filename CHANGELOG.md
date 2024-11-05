@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.1
+
+* Add make_atomic_message and prevent call when server_ip found. 
+
 ## 0.5.0
 
 * Convert import message for any language.

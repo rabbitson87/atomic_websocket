@@ -132,15 +132,18 @@ pub fn get_data_schema(data: &[u8]) -> Data<'_> {
     }
 }
 
-pub fn make_response_message(category: Category, mut datas: Vec<u8>) -> Message {
+pub fn make_atomic_message(category: u16, mut datas: Vec<u8>) -> Message {
     let mut byte = {
-        let category = category as u16;
         let quotient = category / 256;
         let remainder = category % 256;
         vec![remainder as u8, quotient as u8]
     };
     byte.append(&mut datas);
     Message::Binary(byte)
+}
+
+pub fn make_response_message(category: Category, datas: Vec<u8>) -> Message {
+    make_atomic_message(category as u16, datas)
 }
 
 pub fn make_disconnect_message(peer: &str) -> Message {

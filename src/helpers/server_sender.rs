@@ -321,11 +321,9 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
     }
 
     async fn is_connect_list(&self, server_ip: &str) -> bool {
-        self.read()
-            .await
-            .connect_list
-            .iter()
-            .any(|x| x == server_ip)
+        let server_sender = self.read().await;
+        server_sender.connect_list.iter().any(|x| x == server_ip)
+            || (server_sender.server_ip != "" && server_sender.server_ip != server_ip)
     }
 
     async fn add_connect_list(&self, server_ip: &str) {

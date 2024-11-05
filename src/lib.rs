@@ -38,7 +38,9 @@ pub mod server_sender {
 }
 
 pub mod common {
-    pub use crate::helpers::common::{get_setting_by_key, make_response_message, set_setting};
+    pub use crate::helpers::common::{
+        get_setting_by_key, make_atomic_message, make_response_message, set_setting,
+    };
     pub use crate::helpers::get_internal_websocket::get_id;
 }
 
