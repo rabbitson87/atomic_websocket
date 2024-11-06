@@ -71,14 +71,8 @@ impl ClientSenders {
     }
 
     pub fn remove(&mut self, peer: &str) {
-        let list = self.lists.iter().position(|x| x.peer == peer);
-        log_debug!("Remove peer: {:?}, list: {:?}", peer, list);
-        match list {
-            Some(index) => {
-                self.lists.remove(index);
-            }
-            None => {}
-        };
+        self.lists.retain(|x| x.peer != peer);
+        log_debug!("Remove peer: {:?}", peer);
     }
 
     pub fn write_time(&mut self, peer: &str) {
@@ -127,7 +121,7 @@ pub trait ClientSendersTrait {
     async fn add(&self, peer: &str, sx: Sender<Message>);
     async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)>;
     async fn send_handle_message(&self, data: Data<'_>, peer: &str);
-    async fn send(&self, peer: &str, message: Message);
+    async fn send(&self, peer: &str, message: Message) -> bool;
     async fn expire_send(&self, peer_list: Vec<String>);
     async fn is_active(&self, peer: &str) -> bool;
 }
@@ -148,13 +142,14 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
         self.write().await.send_handle_message(buf, peer);
     }
 
-    async fn send(&self, peer: &str, message: Message) {
+    async fn send(&self, peer: &str, message: Message) -> bool {
         let result = self.read().await.send(peer, message).await;
 
         match result {
             true => self.write().await.write_time(peer),
             false => self.write().await.remove(peer),
         }
+        result
     }
 
     async fn expire_send(&self, peer_list: Vec<String>) {

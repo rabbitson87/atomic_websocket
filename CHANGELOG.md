@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.4
+
+* Add for client_senders's send is return bool.
+
 ## 0.5.3
 
 * Fixed for freeze client_sender when client_senders send fail process.
