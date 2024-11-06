@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.5
+
+* Add for client_connector timeout option.
+
 ## 0.5.4
 
 * Add for client_senders's send is return bool.

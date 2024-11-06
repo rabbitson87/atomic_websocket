@@ -24,6 +24,7 @@ pub struct ClientOptions {
     pub url: String,
     pub retry_seconds: u64,
     pub use_keep_ip: bool,
+    pub connect_timeout_seconds: u64,
     #[cfg(feature = "native_tls")]
     pub use_tls: bool,
 }
@@ -35,6 +36,7 @@ impl Default for ClientOptions {
             url: "".into(),
             retry_seconds: 30,
             use_keep_ip: false,
+            connect_timeout_seconds: 3,
             #[cfg(feature = "native_tls")]
             use_tls: true,
         }
@@ -337,16 +339,18 @@ pub async fn get_internal_connect(
         "" => {
             let mut sub_ip = 1_u8;
             loop {
+                if sub_ip == ips[3].parse::<u8>()? {
+                    sub_ip += 1;
+                    continue;
+                }
                 let server_url = format!(
                     "ws://{}.{}.{}.{}:{}",
                     ips[0], ips[1], ips[2], sub_ip, connect_info_data.port
                 );
-                let db_clone = db.clone();
-                let server_sender_clone = server_sender.clone();
 
                 tokio::spawn(wrap_get_internal_websocket(
-                    db_clone,
-                    server_sender_clone,
+                    db.clone(),
+                    server_sender.clone(),
                     server_url.copy_string(),
                     options.clone(),
                 ));
@@ -357,11 +361,9 @@ pub async fn get_internal_connect(
             }
         }
         _server_ip => {
-            let db_clone = db.clone();
-            let server_sender_clone = server_sender.clone();
             tokio::spawn(wrap_get_internal_websocket(
-                db_clone,
-                server_sender_clone,
+                db.clone(),
+                server_sender.clone(),
                 _server_ip.into(),
                 options.clone(),
             ));

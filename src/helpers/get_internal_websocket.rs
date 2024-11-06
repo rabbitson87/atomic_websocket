@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, Mutex, RwLock},
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -47,8 +47,13 @@ pub async fn get_internal_websocket(
         return Ok(());
     }
     log_debug!("Connecting to {}", server_ip);
-    match connect_async(&server_ip).await {
-        Ok((ws_stream, _)) => {
+    match timeout(
+        Duration::from_secs(options.connect_timeout_seconds),
+        connect_async(&server_ip),
+    )
+    .await
+    {
+        Ok(Ok((ws_stream, _))) => {
             handle_websocket(
                 db,
                 server_sender.clone(),
@@ -59,6 +64,10 @@ pub async fn get_internal_websocket(
             .await?
         }
         Err(e) => {
+            server_sender.change_ip_if_valid_server_ip(&server_ip).await;
+            log_error!("Error connecting to {}: {:?}", server_ip, e);
+        }
+        Ok(Err(e)) => {
             server_sender.change_ip_if_valid_server_ip(&server_ip).await;
             log_error!("Error connecting to {}: {:?}", server_ip, e);
         }
