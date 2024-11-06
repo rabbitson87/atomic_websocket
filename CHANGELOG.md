@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.3
+
+* Fixed for freeze client_sender when client_senders send fail process.
+
 ## 0.5.2
 
 * Fixed for remove client when client_senders send fail.

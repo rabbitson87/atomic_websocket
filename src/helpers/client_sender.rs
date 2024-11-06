@@ -81,16 +81,23 @@ impl ClientSenders {
         };
     }
 
-    pub async fn send(&mut self, peer: &str, message: Message) -> bool {
-        let mut result = false;
+    pub fn write_time(&mut self, peer: &str) {
         for client in self.lists.iter_mut() {
+            if client.peer == peer {
+                client.write_time();
+            }
+        }
+    }
+
+    pub async fn send(&self, peer: &str, message: Message) -> bool {
+        let mut result = false;
+        for client in self.lists.iter() {
             if client.peer == peer {
                 let sender = client.sx.clone();
                 let mut count = 0;
                 loop {
                     match sender.send(message.clone()).await {
                         Ok(_) => {
-                            client.write_time();
                             result = true;
                             break;
                         }
@@ -142,11 +149,11 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
     }
 
     async fn send(&self, peer: &str, message: Message) {
-        let mut clone = self.write().await;
-        let result = clone.send(peer, message).await;
+        let result = self.read().await.send(peer, message).await;
 
-        if result == false {
-            clone.remove(peer);
+        match result {
+            true => self.write().await.write_time(peer),
+            false => self.write().await.remove(peer),
         }
     }
 
