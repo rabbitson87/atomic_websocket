@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.7
+
+* Remove for server_sender's get_server_ip, fixed get_data_schema.
+
 ## 0.5.6
 
 * Fixed for server_sender's change_ip to remove_ip.

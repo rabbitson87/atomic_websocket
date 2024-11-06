@@ -125,11 +125,14 @@ pub fn make_ping_message(peer: &str) -> Message {
     make_response_message(Category::Ping, datas)
 }
 
-pub fn get_data_schema(data: &[u8]) -> Data<'_> {
-    Data {
+pub fn get_data_schema(data: &[u8]) -> Result<Data<'_>, Box<dyn Error>> {
+    if data.len() < 2 {
+        return Err("Data length is too short".into());
+    }
+    Ok(Data {
         category: data[0] as u16 + data[1] as u16 * 256,
         datas: bebop::SliceWrapper::from_raw(&data[2..]),
-    }
+    })
 }
 
 pub fn make_atomic_message(category: u16, mut datas: Vec<u8>) -> Message {

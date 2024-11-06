@@ -99,11 +99,18 @@ pub async fn handle_websocket(
     let retry_seconds = options.retry_seconds;
     let mut is_first = true;
     let server_sender_clone = server_sender.clone();
+    let server_ip_clone = server_ip.copy_string();
     tokio::spawn(async move {
         let is_wait_ping = Arc::new(Mutex::new(false));
         while let Some(Ok(message)) = istream.next().await {
             let value = message.into_data();
-            let data = get_data_schema(&value);
+            let data = match get_data_schema(&value) {
+                Ok(data) => data,
+                Err(e) => {
+                    log_error!("Error getting data schema: {:?}", e);
+                    continue;
+                }
+            };
 
             let id_clone = id.copy_string();
             log_debug!("Client receive message: {:?}", data);
@@ -131,7 +138,13 @@ pub async fn handle_websocket(
             } else if data.category == Category::Disconnect as u16 {
                 let _ = sx
                     .send(make_disconnect_message(
-                        &server_sender_clone.get_server_ip().await,
+                        server_ip_clone
+                            .split("://")
+                            .nth(1)
+                            .unwrap()
+                            .split(":")
+                            .nth(0)
+                            .unwrap(),
                     ))
                     .await;
                 break;
@@ -144,7 +157,14 @@ pub async fn handle_websocket(
         match ostream.send(message.clone()).await {
             Ok(_) => {
                 let data = message.into_data();
-                let data = get_data_schema(&data);
+                let data = match get_data_schema(&data) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        log_error!("Error getting data schema: {:?}", e);
+                        rx.close();
+                        break;
+                    }
+                };
                 log_debug!("Send message: {:?}", data);
                 if data.category == Category::Disconnect as u16 {
                     rx.close();

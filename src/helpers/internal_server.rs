@@ -150,7 +150,13 @@ pub async fn handle_connection(
                     Some(id) => {
                         while let Some(Ok(message)) = istream.next().await {
                             let value = message.into_data();
-                            let data = get_data_schema(&value);
+                            let data = match get_data_schema(&value) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    log_error!("Error getting data schema: {:?}", e);
+                                    continue;
+                                }
+                            };
                             if data.category == Category::Ping as u16 && use_ping {
                                 if let Ok(data) = Ping::deserialize(&data.datas) {
                                     client_senders
@@ -175,7 +181,14 @@ pub async fn handle_connection(
             while let Some(message) = rx.recv().await {
                 ostream.send(message.clone()).await?;
                 let data = message.into_data();
-                let data = get_data_schema(&data);
+                let data = match get_data_schema(&data) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        log_error!("Error getting data schema: {:?}", e);
+                        rx.close();
+                        break;
+                    }
+                };
                 log_debug!("Server sending message: {:?}", data);
                 if data.category == Category::Disconnect as u16 {
                     rx.close();
@@ -203,7 +216,13 @@ async fn get_id_from_first_message(
     if let Some(Ok(message)) = istream.next().await {
         log_debug!("receive first message from client: {:?}", message);
         let value = message.into_data();
-        let mut data = get_data_schema(&value);
+        let mut data = match get_data_schema(&value) {
+            Ok(data) => data,
+            Err(e) => {
+                log_error!("Error getting data schema: {:?}", e);
+                return None;
+            }
+        };
         if data.category == Category::Ping as u16 {
             log_debug!("receive ping from client: {:?}", data);
             if let Ok(ping) = Ping::deserialize(&data.datas) {

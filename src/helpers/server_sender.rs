@@ -160,7 +160,6 @@ pub trait ServerSenderTrait {
     async fn send(&self, message: Message);
     async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>);
     async fn is_valid_server_ip(&self) -> bool;
-    async fn get_server_ip(&self) -> String;
     async fn remove_ip(&self);
     async fn remove_ip_if_valid_server_ip(&self, server_ip: &str);
     async fn write_received_times(&self);
@@ -267,20 +266,6 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
                 > now().timestamp();
         drop(clone);
         result
-    }
-
-    async fn get_server_ip(&self) -> String {
-        self.read()
-            .await
-            .server_ip
-            .copy_string()
-            .split("://")
-            .nth(1)
-            .unwrap()
-            .split(":")
-            .nth(0)
-            .unwrap()
-            .into()
     }
 
     async fn remove_ip(&self) {
