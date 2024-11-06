@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.6
+
+* Fixed for server_sender's change_ip to remove_ip.
+
 ## 0.5.5
 
 * Add for client_connector timeout option.

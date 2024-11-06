@@ -73,21 +73,27 @@ impl ServerSender {
     pub fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
         self.server_sender = Some(server_sender);
     }
-    pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: &str) {
+    fn sx_drop(&mut self) {
         if self.sx.is_some() {
             let sender = self.sx.clone().unwrap();
-            let server_ip = self.server_ip.copy_string();
+            let prev_server_ip = self.server_ip.copy_string();
             tokio::spawn(async move {
-                let _ = sender.send(make_disconnect_message(&server_ip)).await;
+                let _ = sender.send(make_disconnect_message(&prev_server_ip)).await;
                 sender.closed().await;
             });
             self.sx = None;
         }
+    }
+    pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: &str) {
+        self.sx_drop();
         self.sx = Some(sx);
         self.server_ip = server_ip.into();
     }
-    pub fn change_ip(&mut self, server_ip: &str) {
-        self.server_ip = server_ip.into();
+    pub fn remove_ip(&mut self) {
+        if !self.server_ip.is_empty() {
+            self.sx_drop();
+            self.server_ip = "".into();
+        }
     }
     pub fn send_status(&self, status: SenderStatus) {
         let status_sx = self.status_sx.clone();
@@ -155,8 +161,8 @@ pub trait ServerSenderTrait {
     async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>);
     async fn is_valid_server_ip(&self) -> bool;
     async fn get_server_ip(&self) -> String;
-    async fn change_ip(&self, server_ip: &str);
-    async fn change_ip_if_valid_server_ip(&self, server_ip: &str);
+    async fn remove_ip(&self);
+    async fn remove_ip_if_valid_server_ip(&self, server_ip: &str);
     async fn write_received_times(&self);
     async fn is_connect_list(&self, server_ip: &str) -> bool;
     async fn add_connect_list(&self, server_ip: &str);
@@ -277,11 +283,11 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
             .into()
     }
 
-    async fn change_ip(&self, server_ip: &str) {
-        self.write().await.change_ip(server_ip);
+    async fn remove_ip(&self) {
+        self.write().await.remove_ip();
     }
 
-    async fn change_ip_if_valid_server_ip(&self, server_ip: &str) {
+    async fn remove_ip_if_valid_server_ip(&self, server_ip: &str) {
         let db = self.read().await.db.clone();
         let server_connect_info =
             match get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await
@@ -296,7 +302,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
             let mut info = ServerConnectInfo::deserialize(&server_connect_info.value).unwrap();
 
             if info.server_ip == server_ip {
-                self.change_ip("".into()).await;
+                self.remove_ip().await;
                 info.server_ip = "".into();
                 let mut value = Vec::new();
                 info.serialize(&mut value).unwrap();
@@ -322,8 +328,13 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
 
     async fn is_connect_list(&self, server_ip: &str) -> bool {
         let server_sender = self.read().await;
+        log_debug!(
+            "server_sender.server_ip: {:?}, server_ip: {}",
+            server_sender.server_ip,
+            server_ip
+        );
         server_sender.connect_list.iter().any(|x| x == server_ip)
-            || (server_sender.server_ip != "" && server_sender.server_ip != server_ip)
+            || (!server_sender.server_ip.is_empty() && server_sender.server_ip != server_ip)
     }
 
     async fn add_connect_list(&self, server_ip: &str) {

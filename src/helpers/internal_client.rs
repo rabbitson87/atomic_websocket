@@ -135,7 +135,7 @@ async fn internal_ping_loop_cheker(
             drop(server_sender_clone);
             server_sender.send_status(SenderStatus::Disconnected).await;
             if !use_keep_ip {
-                server_sender.change_ip("".into()).await;
+                server_sender.remove_ip().await;
                 let server_sender_clone = server_sender.clone();
                 let server_sender_clone = server_sender_clone.read().await;
                 let db = server_sender_clone.db.clone();
@@ -220,7 +220,7 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
             server_sender.send_status(SenderStatus::Disconnected).await;
 
             if !use_keep_ip {
-                server_sender.change_ip("".into()).await;
+                server_sender.remove_ip().await;
             }
 
             let server_sender_clone = server_sender.clone();
@@ -259,10 +259,6 @@ pub async fn get_outer_connect(
     let server_connect_info =
         get_setting_by_key(db.clone(), format!("{:?}", SaveKey::ServerConnectInfo)).await?;
     log_debug!("server_connect_info: {:?}", server_connect_info);
-
-    if !options.url.is_empty() {
-        server_sender.change_ip(&options.url).await;
-    }
 
     if options.url.is_empty() && !server_sender.is_valid_server_ip().await {
         server_sender.send_status(SenderStatus::Disconnected).await;

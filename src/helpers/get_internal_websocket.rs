@@ -64,11 +64,11 @@ pub async fn get_internal_websocket(
             .await?
         }
         Err(e) => {
-            server_sender.change_ip_if_valid_server_ip(&server_ip).await;
+            server_sender.remove_ip_if_valid_server_ip(&server_ip).await;
             log_error!("Error connecting to {}: {:?}", server_ip, e);
         }
         Ok(Err(e)) => {
-            server_sender.change_ip_if_valid_server_ip(&server_ip).await;
+            server_sender.remove_ip_if_valid_server_ip(&server_ip).await;
             log_error!("Error connecting to {}: {:?}", server_ip, e);
         }
     }
