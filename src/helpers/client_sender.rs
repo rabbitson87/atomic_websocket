@@ -82,7 +82,7 @@ impl ClientSenders {
     }
 
     pub async fn send(&mut self, peer: &str, message: Message) -> bool {
-        let mut result = true;
+        let mut result = false;
         for client in self.lists.iter_mut() {
             if client.peer == peer {
                 let sender = client.sx.clone();
@@ -91,6 +91,7 @@ impl ClientSenders {
                     match sender.send(message.clone()).await {
                         Ok(_) => {
                             client.write_time();
+                            result = true;
                             break;
                         }
                         Err(e) => {

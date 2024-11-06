@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.2
+
+* Fixed for remove client when client_senders send fail.
+
 ## 0.5.1
 
 * Add make_atomic_message and prevent call when server_ip found. 
