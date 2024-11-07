@@ -1,5 +1,9 @@
 # Changes
 
+## 0.5.8
+
+* Fixed for client_sender's check_client_send_time.
+
 ## 0.5.7
 
 * Remove for server_sender's get_server_ip, fixed get_data_schema.

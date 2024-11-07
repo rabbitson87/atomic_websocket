@@ -14,7 +14,7 @@ use crate::{
     schema::Data,
 };
 
-use super::common::make_expired_output_message;
+use super::{common::make_expired_output_message, traits::StringUtil};
 
 pub struct ClientSenders {
     lists: Vec<ClientSender>,
@@ -60,14 +60,12 @@ impl ClientSenders {
     pub fn check_client_send_time(&mut self) {
         let now = now().timestamp();
         let mut remove_list = Vec::new();
-        for (index, client) in self.lists.iter().enumerate() {
+        for client in self.lists.iter() {
             if client.send_time + 30 < now {
-                remove_list.push(index);
+                remove_list.push(client.peer.copy_string());
             }
         }
-        for index in remove_list {
-            self.lists.remove(index);
-        }
+        self.lists.retain(|x| !remove_list.contains(&x.peer));
     }
 
     pub fn remove(&mut self, peer: &str) {
