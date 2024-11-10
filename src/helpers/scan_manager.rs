@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{timeout, MissedTickBehavior};
 use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
 
 use crate::helpers::traits::connection_state::ConnectionManager;
@@ -112,25 +112,32 @@ async fn check_connection(
     WebSocketStatus,
     Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
 ) {
-    match connect_async(&server_ip).await {
-        Ok((ws_stream, _)) => {
-            // 연결 성공
-            (WebSocketStatus::Connected, Some(ws_stream))
-        }
-        Err(e) => {
-            match e {
-                tungstenite::Error::Io(e) => match e.kind() {
-                    std::io::ErrorKind::ConnectionRefused => {
-                        // 포트는 닫혔지만 호스트는 존재
-                        (WebSocketStatus::ConnectionRefused, None)
-                    }
-                    _ => {
-                        // 그 외 에러 (호스트가 없거나 네트워크 문제)
-                        (WebSocketStatus::Timeout, None)
-                    }
-                },
-                _ => (WebSocketStatus::Timeout, None),
+    match timeout(Duration::from_secs(10), connect_async(&server_ip)).await {
+        Ok(result) => match result {
+            Ok((ws_stream, _)) => {
+                // 연결 성공
+                (WebSocketStatus::Connected, Some(ws_stream))
             }
+
+            Err(e) => {
+                match e {
+                    tungstenite::Error::Io(e) => match e.kind() {
+                        std::io::ErrorKind::ConnectionRefused => {
+                            // 포트는 닫혔지만 호스트는 존재
+                            (WebSocketStatus::ConnectionRefused, None)
+                        }
+                        _ => {
+                            // 그 외 에러 (호스트가 없거나 네트워크 문제)
+                            (WebSocketStatus::Timeout, None)
+                        }
+                    },
+                    _ => (WebSocketStatus::Timeout, None),
+                }
+            }
+        },
+        Err(_) => {
+            // 타임아웃
+            (WebSocketStatus::Timeout, None)
         }
     }
 }

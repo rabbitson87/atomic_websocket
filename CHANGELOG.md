@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.5
+
+* Improve scan ip using timeout(10s).
+
 ## 0.6.4
 
 * Fixed for client_sender's handle message.
