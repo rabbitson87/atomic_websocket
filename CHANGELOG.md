@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.3
+
+* Fixed for scan_manager when is_connected function.
+
 ## 0.6.2
 
 * Fixed scan ip for internal client connect when connected server.

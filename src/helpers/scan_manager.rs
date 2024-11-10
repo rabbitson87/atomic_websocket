@@ -49,7 +49,7 @@ impl ScanManager {
             }
         }
         // 연결된 상태인지 확인
-        if self.connection_states.get_connected_ip().await.is_some() {
+        if self.connection_states.is_connected().await {
             return false;
         }
         true

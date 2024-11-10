@@ -20,6 +20,7 @@ pub trait ConnectionManager {
     async fn get_connected_ip(
         &self,
     ) -> Option<(String, WebSocketStream<MaybeTlsStream<TcpStream>>)>;
+    async fn is_connected(&self) -> bool;
 }
 
 impl ConnectionManager for Arc<RwLock<HashMap<String, ConnectionState>>> {
@@ -61,5 +62,14 @@ impl ConnectionManager for Arc<RwLock<HashMap<String, ConnectionState>>> {
             }
         }
         None
+    }
+
+    async fn is_connected(&self) -> bool {
+        for (_server_ip, state) in self.write().await.iter_mut() {
+            if state.status == WebSocketStatus::Connected {
+                return true;
+            }
+        }
+        false
     }
 }
