@@ -15,7 +15,7 @@ use atomic_websocket::{
 };
 use bebop::Record;
 use tokio::{
-    sync::{broadcast::Receiver, RwLock},
+    sync::{mpsc::Receiver, RwLock},
     time::sleep,
 };
 
@@ -53,7 +53,7 @@ async fn server_start(address: String) {
 }
 
 pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, String)>) {
-    while let Ok((data, peer)) = receiver.recv().await {
+    while let Some((data, peer)) = receiver.recv().await {
         // log::debug!("Message: {:?}", message);
 
         if let Ok(data) = Data::deserialize(&data) {

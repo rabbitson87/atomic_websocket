@@ -3,7 +3,10 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use bebop::Record;
 use tokio::{
-    sync::{broadcast, mpsc::Sender, RwLock},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        RwLock,
+    },
     time::sleep,
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -18,16 +21,17 @@ use super::{common::make_expired_output_message, traits::StringUtil};
 
 pub struct ClientSenders {
     lists: Vec<ClientSender>,
-    handle_message_sx: broadcast::Sender<(Vec<u8>, String)>,
+    handle_message_sx: Sender<(Vec<u8>, String)>,
+    handle_message_rx: Option<Receiver<(Vec<u8>, String)>>,
 }
 
 impl ClientSenders {
     pub fn new() -> Self {
-        let (handle_message_sx, rx) = broadcast::channel(1024);
-        drop(rx);
+        let (handle_message_sx, handle_message_rx) = mpsc::channel(1024);
         Self {
             lists: Vec::new(),
             handle_message_sx,
+            handle_message_rx: Some(handle_message_rx),
         }
     }
 
@@ -48,8 +52,10 @@ impl ClientSenders {
         };
     }
 
-    pub fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)> {
-        self.handle_message_sx.subscribe()
+    pub fn get_handle_message_receiver(&mut self) -> Receiver<(Vec<u8>, String)> {
+        self.handle_message_rx
+            .take()
+            .expect("Receiver already taken")
     }
 
     pub fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
@@ -119,7 +125,7 @@ impl ClientSenders {
 #[async_trait]
 pub trait ClientSendersTrait {
     async fn add(&self, peer: &str, sx: Sender<Message>);
-    async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)>;
+    async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)>;
     async fn send_handle_message(&self, data: Data<'_>, peer: &str);
     async fn send(&self, peer: &str, message: Message) -> bool;
     async fn expire_send(&self, peer_list: Vec<String>);
@@ -132,8 +138,8 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
         self.write().await.add(peer, sx).await;
     }
 
-    async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)> {
-        self.read().await.get_handle_message_receiver()
+    async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
+        self.write().await.get_handle_message_receiver()
     }
 
     async fn send_handle_message(&self, data: Data<'_>, peer: &str) {

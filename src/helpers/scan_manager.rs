@@ -1,121 +1,113 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::SinkExt;
+use tokio::sync::RwLock;
+use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::{connect_async, tungstenite};
 
+use crate::helpers::traits::connection_state::ConnectionManager;
 use crate::log_debug;
 use crate::server_sender::get_ip_address;
 
 use super::common::make_disconnect_message;
 use super::traits::StringUtil;
 
+pub struct ConnectionState {
+    pub status: WebSocketStatus,
+    pub is_connecting: bool,
+}
+
 pub struct ScanManager {
-    quick_scan_ips: Vec<String>, // ConnectionRefused였던 IP들
-    slow_scan_ips: Vec<String>,  // 그 외 IP들
-    last_scan_times: HashMap<String, Instant>,
-    quick_interval: Duration, // 2초
-    slow_interval: Duration,  // 30초
+    scan_ips: Vec<String>, // ConnectionRefused였던 IP들
+    connection_states: Arc<RwLock<HashMap<String, ConnectionState>>>,
 }
 
 impl ScanManager {
     pub fn new(port: &str) -> Self {
-        let mut quick_scan_ips = Vec::new();
+        let mut scan_ips = Vec::new();
         let ip = get_ip_address();
         let ips = ip.split('.').collect::<Vec<&str>>();
 
         for sub_ip in 1..255 {
             let ip = format!("ws://{}.{}.{}.{}:{}", ips[0], ips[1], ips[2], sub_ip, port);
-            quick_scan_ips.push(ip);
+            scan_ips.push(ip);
         }
 
         Self {
-            quick_scan_ips,
-            slow_scan_ips: Vec::new(),
-            last_scan_times: HashMap::new(),
-            quick_interval: Duration::from_secs(2),
-            slow_interval: Duration::from_secs(30),
+            scan_ips,
+            connection_states: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    fn update_status(&mut self, ip: &str, status: &ConnectionStatus) {
-        let now = Instant::now();
-        self.last_scan_times.insert(ip.into(), now);
-
-        match status {
-            ConnectionStatus::PortClosed => {
-                if !self.quick_scan_ips.contains(&ip.into()) {
-                    self.quick_scan_ips.push(ip.into());
-                    self.slow_scan_ips.retain(|x| x != ip);
-                }
-            }
-            _ => {
-                if !self.slow_scan_ips.contains(&ip.into()) {
-                    self.slow_scan_ips.push(ip.into());
-                    self.quick_scan_ips.retain(|x| x != ip);
-                }
+    async fn is_connecting_allowed(&self, server_ip: &str) -> bool {
+        // 이미 연결 시도 중인지 확인
+        if let Some(state) = self.connection_states.read().await.get(server_ip) {
+            if state.is_connecting {
+                return false;
             }
         }
-    }
-
-    fn should_scan(&self, ip: &str) -> bool {
-        let last_scan = self.last_scan_times.get(ip);
-        let now = Instant::now();
-
-        if let Some(last) = last_scan {
-            let interval = if self.quick_scan_ips.contains(&ip.into()) {
-                self.quick_interval
-            } else {
-                self.slow_interval
-            };
-            now.duration_since(*last) >= interval
-        } else {
-            true // 처음 스캔하는 IP는 바로 스캔
+        // 연결된 상태인지 확인
+        if self.connection_states.get_connected_ip().await.is_some() {
+            return false;
         }
+        true
     }
 
-    async fn scan_network(&mut self) -> Option<String> {
-        let scan_list: Vec<String> = self
-            .quick_scan_ips
+    async fn get_scannable_ips(&self) -> Vec<String> {
+        let states = self.connection_states.read().await;
+
+        self.scan_ips
             .iter()
-            .chain(self.slow_scan_ips.iter())
-            .filter(|ip| self.should_scan(ip))
-            .cloned()
-            .collect();
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(255);
-        for server_ip in scan_list {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let status = check_connection(server_ip.copy_string()).await;
-                log_debug!("ip: {}, {:?}", server_ip, status);
-                if !tx.is_closed() {
-                    tx.send((server_ip, status)).await.unwrap();
+            .filter(|server_ip| {
+                if let Some(state) = states.get(*server_ip) {
+                    if state.is_connecting {
+                        return false;
+                    }
                 }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    async fn scan_network(&mut self) {
+        let scan_list: Vec<String> = self.get_scannable_ips().await;
+        println!("scan_list: {:?}", scan_list);
+
+        for server_ip in scan_list {
+            if !self.is_connecting_allowed(&server_ip).await {
+                continue;
+            }
+
+            let connection_states = self.connection_states.clone();
+            let server_ip = server_ip.clone();
+            tokio::spawn(async move {
+                connection_states.start_connection(&server_ip).await;
+                let status = check_connection(server_ip.copy_string()).await;
+                log_debug!("server_ip: {}, {:?}", server_ip, status);
+                connection_states.end_connection(&server_ip, status).await;
             });
         }
-        drop(tx);
-
-        while let Some((server_ip, status)) = rx.recv().await {
-            self.update_status(&server_ip, &status);
-            if status == ConnectionStatus::Success {
-                rx.close();
-                return Some(server_ip);
-            }
-        }
-        None
     }
 
     pub async fn run(&mut self) -> String {
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(2));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
-            if let Some(server_ip) = self.scan_network().await {
+            interval.tick().await;
+            if let Some(server_ip) = self.connection_states.get_connected_ip().await {
                 return server_ip;
             }
+            self.scan_network().await;
         }
     }
 }
 
-async fn check_connection(server_ip: String) -> ConnectionStatus {
+async fn check_connection(server_ip: String) -> WebSocketStatus {
     match connect_async(&server_ip).await {
         Ok((mut ws_stream, _)) => {
             ws_stream
@@ -124,39 +116,30 @@ async fn check_connection(server_ip: String) -> ConnectionStatus {
                 .unwrap();
             ws_stream.flush().await.unwrap();
             // 연결 성공
-            ConnectionStatus::Success
+            WebSocketStatus::Connected
         }
         Err(e) => {
             match e {
                 tungstenite::Error::Io(e) => match e.kind() {
-                    std::io::ErrorKind::TimedOut => {
-                        // 타임아웃 - 호스트는 존재할 수 있지만 응답 없음
-                        ConnectionStatus::Timeout
-                    }
                     std::io::ErrorKind::ConnectionRefused => {
                         // 포트는 닫혔지만 호스트는 존재
-                        ConnectionStatus::PortClosed
-                    }
-                    std::io::ErrorKind::ConnectionReset => {
-                        // 연결이 리셋됨 - 방화벽이나 보안 설정 가능성
-                        ConnectionStatus::Reset
+                        WebSocketStatus::ConnectionRefused
                     }
                     _ => {
                         // 그 외 에러 (호스트가 없거나 네트워크 문제)
-                        ConnectionStatus::Failed
+                        WebSocketStatus::Timeout
                     }
                 },
-                _ => ConnectionStatus::Failed,
+                _ => WebSocketStatus::Timeout,
             }
         }
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ConnectionStatus {
-    Success,
+pub enum WebSocketStatus {
+    Connecting,
+    Connected,
+    ConnectionRefused,
     Timeout,
-    PortClosed,
-    Reset,
-    Failed,
 }

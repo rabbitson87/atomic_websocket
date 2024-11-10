@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     self,
     net::{TcpListener, TcpStream},
-    sync::{broadcast, RwLock},
+    sync::{mpsc::Receiver, RwLock},
     time::{Instant, MissedTickBehavior},
 };
 use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
@@ -62,7 +62,7 @@ impl AtomicServer {
         Self { client_senders }
     }
 
-    pub async fn get_handle_message_receiver(&self) -> broadcast::Receiver<(Vec<u8>, String)> {
+    pub async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
         self.client_senders.get_handle_message_receiver().await
     }
 }
@@ -76,10 +76,7 @@ pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
 
     loop {
         interval.tick().await;
-        let server_sender_clone = server_sender.clone();
-        let mut server_sender_clone = server_sender_clone.write().await;
-        server_sender_clone.check_client_send_time();
-        drop(server_sender_clone);
+        server_sender.write().await.check_client_send_time();
         log_debug!("loop client cheker finish");
     }
 }
