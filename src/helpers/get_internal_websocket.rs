@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use native_db::Database;
 use std::time::Duration;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, Mutex, RwLock},
+    sync::{mpsc, RwLock},
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
@@ -15,7 +15,7 @@ use crate::{
     helpers::{
         common::{get_data_schema, make_disconnect_message, make_ping_message},
         server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
-        traits::{ping::PingCheck, StringUtil},
+        traits::{atomic::FlagAtomic, StringUtil},
     },
     log_debug, log_error, Settings,
 };
@@ -43,9 +43,6 @@ pub async fn get_internal_websocket(
     server_ip: String,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    if !server_sender.is_start_connect(&server_ip).await {
-        return Ok(());
-    }
     log_debug!("Connecting to {}", server_ip);
     match timeout(
         Duration::from_secs(options.connect_timeout_seconds),
@@ -72,7 +69,6 @@ pub async fn get_internal_websocket(
             log_error!("Error connecting to {}: {:?}", server_ip, e);
         }
     }
-    server_sender.remove_connect_list(&server_ip).await;
     log_debug!("Failed to server connect to {}", server_ip);
     Ok(())
 }
@@ -101,7 +97,10 @@ pub async fn handle_websocket(
     let server_sender_clone = server_sender.clone();
     let server_ip_clone = server_ip.copy_string();
     tokio::spawn(async move {
-        let is_wait_ping = Arc::new(Mutex::new(false));
+        let server_ip = server_ip_clone;
+        let server_sender = server_sender_clone;
+        let is_wait_ping = Arc::new(AtomicBool::new(false));
+
         while let Some(Ok(message)) = istream.next().await {
             let value = message.into_data();
             let data = match get_data_schema(&value) {
@@ -112,33 +111,29 @@ pub async fn handle_websocket(
                 }
             };
 
-            let id_clone = id.copy_string();
+            let id = id.copy_string();
             log_debug!("Client receive message: {:?}", data);
             if data.category == Category::Pong as u16 {
                 if is_first {
                     is_first = false;
-                    server_sender_clone
-                        .send_status(SenderStatus::Connected)
-                        .await;
+                    server_sender.send_status(SenderStatus::Connected).await;
                 }
-                if !is_wait_ping.is_wait_ping().await {
-                    is_wait_ping.set_wait_ping(true).await;
-                    server_sender_clone.write_received_times().await;
-                    let server_sender_clone2 = server_sender_clone.clone();
+                if !is_wait_ping.is_true() {
+                    is_wait_ping.set_bool(true);
+                    server_sender.write_received_times().await;
+                    let server_sender_clone = server_sender.clone();
                     let is_wait_ping_clone = is_wait_ping.clone();
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(retry_seconds)).await;
-                        server_sender_clone2
-                            .send(make_ping_message(&id_clone))
-                            .await;
-                        is_wait_ping_clone.set_wait_ping(false).await;
+                        server_sender_clone.send(make_ping_message(&id)).await;
+                        is_wait_ping_clone.set_bool(false);
                     });
                 }
                 continue;
             } else if data.category == Category::Disconnect as u16 {
                 let _ = sx
                     .send(make_disconnect_message(
-                        server_ip_clone
+                        server_ip
                             .split("://")
                             .nth(1)
                             .unwrap()
@@ -149,7 +144,7 @@ pub async fn handle_websocket(
                     .await;
                 break;
             }
-            server_sender_clone.send_handle_message(data).await;
+            server_sender.send_handle_message(data).await;
         }
     });
 
@@ -178,7 +173,6 @@ pub async fn handle_websocket(
         }
     }
     log_debug!("WebSocket closed");
-    server_sender.remove_connect_list(&server_ip).await;
     ostream.flush().await?;
     Ok(())
 }

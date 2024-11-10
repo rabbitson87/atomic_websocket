@@ -15,7 +15,7 @@ use atomic_websocket::{
 };
 use bebop::Record;
 use tokio::{
-    sync::{broadcast::Receiver, RwLock},
+    sync::{mpsc::Receiver, RwLock},
     time::sleep,
 };
 
@@ -80,7 +80,7 @@ async fn internal_client_start(port: &str) {
 }
 
 pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
-    while let Ok(status) = receiver.recv().await {
+    while let Some(status) = receiver.recv().await {
         log::debug!("Status: {:?}", status);
         if status == SenderStatus::Disconnected {
             log::debug!("Disconnected");
@@ -106,7 +106,7 @@ pub async fn receive_status(mut receiver: Receiver<SenderStatus>) {
 }
 
 pub async fn receive_handle_message(mut receiver: Receiver<Vec<u8>>) {
-    while let Ok(message) = receiver.recv().await {
+    while let Some(message) = receiver.recv().await {
         if let Ok(data) = Data::deserialize(&message) {
             match Category::try_from(data.category as u32).unwrap() {
                 Category::AppStartupOutput => {

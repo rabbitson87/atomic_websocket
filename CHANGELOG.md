@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.0
+
+* Improve scan ip for internal client connect, adjust backoff send, change message receiver from broadcast to mpsc.
+
 ## 0.5.8
 
 * Fixed for client_sender's check_client_send_time.

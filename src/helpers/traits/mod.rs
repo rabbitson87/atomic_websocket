@@ -1,5 +1,5 @@
+pub mod atomic;
 pub mod date_time;
-pub mod ping;
 
 pub trait StringUtil {
     fn copy_string(&self) -> String;

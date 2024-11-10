@@ -82,32 +82,34 @@ impl ClientSenders {
     }
 
     pub async fn send(&self, peer: &str, message: Message) -> bool {
-        let mut result = false;
         for client in self.lists.iter() {
             if client.peer == peer {
                 let sender = client.sx.clone();
+                let mut backoff = Duration::from_millis(50); // 시작은 50ms로
+                let max_backoff = Duration::from_secs(1); // 최대 1초
                 let mut count = 0;
+
                 loop {
                     match sender.send(message.clone()).await {
-                        Ok(_) => {
-                            result = true;
-                            break;
-                        }
+                        Ok(_) => return true,
                         Err(e) => {
                             if count > 5 {
-                                drop(sender);
-                                result = false;
-                                break;
+                                log_error!("Failed to send after 5 retries: {:?}", e);
+                                return false;
                             }
-                            log_error!("Error client sending message: {:?}", e);
+
+                            log_error!("Error sending message (attempt {}): {:?}", count + 1, e);
                             count += 1;
-                            sleep(Duration::from_secs(1)).await;
+
+                            // Exponential backoff with max limit
+                            backoff = std::cmp::min(backoff * 2, max_backoff);
+                            sleep(backoff).await;
                         }
                     }
                 }
             }
         }
-        result
+        false
     }
     pub fn is_active(&self, peer: &str) -> bool {
         self.lists.iter().any(|x| x.peer == peer)

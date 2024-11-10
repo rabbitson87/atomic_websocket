@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.5.8"
+version = "0.6.0"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -11,7 +11,7 @@ edition = "2021"
 rust-version = "1.77"
 
 [dependencies]
-tokio = { version = "1.41.0", default-features = false, features = [
+tokio = { version = "1.41.1", default-features = false, features = [
     "sync",
     "macros",
     "time",

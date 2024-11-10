@@ -18,7 +18,7 @@ use crate::{
 use std::time::Duration;
 use tokio::time::timeout;
 
-use crate::{log_debug, server_sender::ServerSenderTrait};
+use crate::log_debug;
 
 pub async fn wrap_get_outer_websocket(
     db: Arc<RwLock<Database<'static>>>,
@@ -40,9 +40,6 @@ pub async fn get_outer_websocket(
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     let server_ip = format!("wss://{}", &options.url);
-    if !server_sender.is_start_connect(&server_ip).await {
-        return Ok(());
-    }
 
     let connector = TlsConnector::new().expect("Failed to create TLS connector");
     let connector = Connector::NativeTls(connector);
@@ -66,7 +63,6 @@ pub async fn get_outer_websocket(
         }
         _ => {}
     }
-    server_sender.remove_connect_list(&server_ip).await;
     log_debug!("Failed to server connect to {}", server_ip);
 
     Ok(())
@@ -79,9 +75,6 @@ pub async fn get_outer_websocket(
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     let server_ip = format!("ws://{}", &options.url);
-    if !server_sender.is_start_connect(&server_ip).await {
-        return Ok(());
-    }
     log_debug!("Connecting to WebSocket server: {:?}", &server_ip);
     match timeout(
         Duration::from_secs(options.connect_timeout_seconds),
@@ -101,7 +94,6 @@ pub async fn get_outer_websocket(
         }
         _ => {}
     }
-    server_sender.remove_connect_list(&server_ip).await;
     log_debug!("Failed to server connect to {}", server_ip);
 
     Ok(())

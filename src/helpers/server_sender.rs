@@ -5,8 +5,8 @@ use bebop::Record;
 use native_db::Database;
 use tokio::{
     sync::{
-        broadcast::{self, Receiver, Sender},
-        mpsc, RwLock,
+        mpsc::{self, Receiver, Sender},
+        RwLock,
     },
     time::sleep,
 };
@@ -38,10 +38,12 @@ pub struct ServerSender {
     pub server_sender: Option<Arc<RwLock<ServerSender>>>,
     pub server_ip: String,
     pub server_received_times: i64,
-    status_sx: Sender<SenderStatus>,
-    handle_message_sx: Sender<Vec<u8>>,
+    status_tx: Sender<SenderStatus>,
+    status_rx: Option<Receiver<SenderStatus>>,
+    handle_message_tx: Sender<Vec<u8>>,
+    handle_message_rx: Option<Receiver<Vec<u8>>>,
     pub options: ClientOptions,
-    pub connect_list: Vec<String>,
+    pub is_try_connect: bool,
 }
 
 impl ServerSender {
@@ -50,25 +52,30 @@ impl ServerSender {
         server_ip: String,
         options: ClientOptions,
     ) -> Self {
-        let (status_sx, _) = broadcast::channel(4);
-        let (handle_message_sx, _) = broadcast::channel(4);
+        let (status_tx, status_rx) = mpsc::channel(8);
+        let (handle_message_tx, handle_message_rx) = mpsc::channel(8);
+
         Self {
             sx: None,
             db,
             server_sender: None,
             server_ip,
             server_received_times: 0,
-            status_sx,
-            handle_message_sx,
+            status_tx,
+            status_rx: Some(status_rx), // 초기에 저장
+            handle_message_tx,
+            handle_message_rx: Some(handle_message_rx),
             options,
-            connect_list: vec![],
+            is_try_connect: false,
         }
     }
-    pub fn get_status_receiver(&self) -> Receiver<SenderStatus> {
-        self.status_sx.subscribe()
+    pub fn get_status_receiver(&mut self) -> Receiver<SenderStatus> {
+        self.status_rx.take().expect("Receiver already taken")
     }
-    pub fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>> {
-        self.handle_message_sx.subscribe()
+    pub fn get_handle_message_receiver(&mut self) -> Receiver<Vec<u8>> {
+        self.handle_message_rx
+            .take()
+            .expect("Receiver already taken")
     }
     pub fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
         self.server_sender = Some(server_sender);
@@ -96,39 +103,39 @@ impl ServerSender {
         }
     }
     pub fn send_status(&self, status: SenderStatus) {
-        let status_sx = self.status_sx.clone();
-        let _ = status_sx.send(status);
+        let status_sx = self.status_tx.clone();
+        let _ = status_sx.try_send(status);
     }
     pub fn send_handle_message(&self, data: Vec<u8>) {
-        let handle_message_sx = self.handle_message_sx.clone();
-        let _ = handle_message_sx.send(data);
+        let handle_message_tx = self.handle_message_tx.clone();
+        let _ = handle_message_tx.try_send(data);
     }
     pub async fn send(&mut self, message: Message) {
         if let Some(sx) = &self.sx {
             let sender = sx.clone();
+            let mut backoff = Duration::from_millis(50); // 시작은 50ms로
+            let max_backoff = Duration::from_secs(1); // 최대 1초
+            let mut count = 0;
+
+            let limit_count = match self.options.retry_seconds > 5 {
+                true => 5,
+                false => match self.options.retry_seconds {
+                    0 | 1 => 1,
+                    _ => self.options.retry_seconds - 1,
+                },
+            };
             match sender.send(message.clone()).await {
                 Ok(_) => {}
                 Err(e) => {
-                    drop(sender);
                     log_error!("Error server sending message: {:?}", e);
                     self.send_status(SenderStatus::Disconnected);
 
-                    let mut count = 0;
-                    let limit_count = match self.options.retry_seconds > 5 {
-                        true => 5,
-                        false => match self.options.retry_seconds {
-                            0 | 1 => 1,
-                            _ => self.options.retry_seconds - 1,
-                        },
-                    };
                     loop {
-                        let sender = sx.clone();
-                        match sender.send(message.clone()).await {
+                        match sx.clone().send(message.clone()).await {
                             Ok(_) => {
                                 break;
                             }
                             Err(e) => {
-                                drop(sender);
                                 if count > limit_count {
                                     tokio::spawn(wrap_get_internal_websocket(
                                         self.db.clone(),
@@ -138,9 +145,17 @@ impl ServerSender {
                                     ));
                                     break;
                                 }
-                                log_error!("Error server sending message: {:?}", e);
+
+                                log_error!(
+                                    "Error sending message (attempt {}): {:?}",
+                                    count + 1,
+                                    e
+                                );
                                 count += 1;
-                                sleep(Duration::from_secs(1)).await;
+
+                                // Exponential backoff with max limit
+                                backoff = std::cmp::min(backoff * 2, max_backoff);
+                                sleep(backoff).await;
                             }
                         };
                     }
@@ -163,10 +178,6 @@ pub trait ServerSenderTrait {
     async fn remove_ip(&self);
     async fn remove_ip_if_valid_server_ip(&self, server_ip: &str);
     async fn write_received_times(&self);
-    async fn is_connect_list(&self, server_ip: &str) -> bool;
-    async fn add_connect_list(&self, server_ip: &str);
-    async fn remove_connect_list(&self, server_ip: &str);
-    async fn is_start_connect(&self, server_ip: &str) -> bool;
 }
 
 #[async_trait]
@@ -230,11 +241,11 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
     }
 
     async fn get_status_receiver(&self) -> Receiver<SenderStatus> {
-        self.read().await.get_status_receiver()
+        self.write().await.get_status_receiver()
     }
 
     async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>> {
-        self.read().await.get_handle_message_receiver()
+        self.write().await.get_handle_message_receiver()
     }
 
     async fn send_status(&self, status: SenderStatus) {
@@ -309,32 +320,5 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
 
     async fn write_received_times(&self) {
         self.write().await.server_received_times = now().timestamp();
-    }
-
-    async fn is_connect_list(&self, server_ip: &str) -> bool {
-        let server_sender = self.read().await;
-        log_debug!(
-            "server_sender.server_ip: {:?}, server_ip: {}",
-            server_sender.server_ip,
-            server_ip
-        );
-        server_sender.connect_list.iter().any(|x| x == server_ip)
-            || (!server_sender.server_ip.is_empty() && server_sender.server_ip != server_ip)
-    }
-
-    async fn add_connect_list(&self, server_ip: &str) {
-        self.write().await.connect_list.push(server_ip.into());
-    }
-
-    async fn remove_connect_list(&self, server_ip: &str) {
-        self.write().await.connect_list.retain(|x| x != server_ip);
-    }
-
-    async fn is_start_connect(&self, server_ip: &str) -> bool {
-        if self.is_connect_list(server_ip).await {
-            return false;
-        }
-        self.add_connect_list(server_ip).await;
-        true
     }
 }
