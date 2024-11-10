@@ -202,20 +202,19 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         let writer = db.rw_transaction().unwrap();
         match server_connect_info {
             Some(before_data) => {
-                let mut data = ServerConnectInfo::deserialize(&before_data.value).unwrap();
+                let before_value = before_data.value.clone();
+                let mut data = ServerConnectInfo::deserialize(&before_value).unwrap();
 
                 data.server_ip = &server_ip;
                 let mut value = Vec::new();
                 data.serialize(&mut value).unwrap();
 
+                writer.remove::<Settings>(before_data).unwrap();
                 writer
-                    .update::<Settings>(
-                        before_data,
-                        Settings {
-                            key: format!("{:?}", SaveKey::ServerConnectInfo),
-                            value,
-                        },
-                    )
+                    .insert::<Settings>(Settings {
+                        key: format!("{:?}", SaveKey::ServerConnectInfo),
+                        value,
+                    })
                     .unwrap();
             }
             None => {
@@ -321,4 +320,12 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
     async fn write_received_times(&self) {
         self.write().await.server_received_times = now().timestamp();
     }
+}
+
+#[test]
+fn get_sercer_connect_info() {
+    let binary: Vec<u8> = vec![0, 0, 0, 0, 5, 0, 0, 0, 49, 54, 50, 53, 48];
+    let data = ServerConnectInfo::deserialize(&binary).unwrap();
+
+    println!("{:?}", data);
 }

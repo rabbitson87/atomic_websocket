@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.6
+
+* Fixed for add server_ip.
+
 ## 0.6.5
 
 * Improve scan ip using timeout(10s).
