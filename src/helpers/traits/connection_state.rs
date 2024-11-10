@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use tokio::sync::RwLock;
+use tokio::{net::TcpStream, sync::RwLock};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::helpers::scan_manager::{ConnectionState, WebSocketStatus};
 
@@ -8,8 +9,17 @@ use super::StringUtil;
 
 pub trait ConnectionManager {
     async fn start_connection(&self, server_ip: &str);
-    async fn end_connection(&self, server_ip: &str, status: WebSocketStatus);
-    async fn get_connected_ip(&self) -> Option<String>;
+    async fn end_connection(
+        &self,
+        server_ip: &str,
+        status: (
+            WebSocketStatus,
+            Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+        ),
+    );
+    async fn get_connected_ip(
+        &self,
+    ) -> Option<(String, WebSocketStream<MaybeTlsStream<TcpStream>>)>;
 }
 
 impl ConnectionManager for Arc<RwLock<HashMap<String, ConnectionState>>> {
@@ -19,21 +29,35 @@ impl ConnectionManager for Arc<RwLock<HashMap<String, ConnectionState>>> {
             ConnectionState {
                 status: WebSocketStatus::Connecting,
                 is_connecting: true,
+                ws_stream: None,
             },
         );
     }
 
-    async fn end_connection(&self, server_ip: &str, status: WebSocketStatus) {
+    async fn end_connection(
+        &self,
+        server_ip: &str,
+        status: (
+            WebSocketStatus,
+            Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+        ),
+    ) {
         if let Some(state) = self.write().await.get_mut(server_ip) {
-            state.status = status;
+            state.status = status.0;
             state.is_connecting = false;
+            state.ws_stream = status.1;
         }
     }
 
-    async fn get_connected_ip(&self) -> Option<String> {
-        for (server_ip, state) in self.read().await.iter() {
+    async fn get_connected_ip(
+        &self,
+    ) -> Option<(String, WebSocketStream<MaybeTlsStream<TcpStream>>)> {
+        for (server_ip, state) in self.write().await.iter_mut() {
             if state.status == WebSocketStatus::Connected {
-                return Some(server_ip.copy_string());
+                return Some((
+                    server_ip.copy_string(),
+                    state.ws_stream.take().expect("ws_stream already taken"),
+                ));
             }
         }
         None

@@ -2,25 +2,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::SinkExt;
+use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::MissedTickBehavior;
-use tokio_tungstenite::{connect_async, tungstenite};
+use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
 
 use crate::helpers::traits::connection_state::ConnectionManager;
 use crate::log_debug;
 use crate::server_sender::get_ip_address;
 
-use super::common::make_disconnect_message;
 use super::traits::StringUtil;
 
 pub struct ConnectionState {
     pub status: WebSocketStatus,
     pub is_connecting: bool,
+    pub ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
 }
 
 pub struct ScanManager {
-    scan_ips: Vec<String>, // ConnectionRefused였던 IP들
+    scan_ips: Vec<String>,
     connection_states: Arc<RwLock<HashMap<String, ConnectionState>>>,
 }
 
@@ -74,7 +74,6 @@ impl ScanManager {
 
     async fn scan_network(&mut self) {
         let scan_list: Vec<String> = self.get_scannable_ips().await;
-        println!("scan_list: {:?}", scan_list);
 
         for server_ip in scan_list {
             if !self.is_connecting_allowed(&server_ip).await {
@@ -92,45 +91,45 @@ impl ScanManager {
         }
     }
 
-    pub async fn run(&mut self) -> String {
+    pub async fn run(&mut self) -> (String, WebSocketStream<MaybeTlsStream<TcpStream>>) {
         let mut interval =
             tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(2));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             interval.tick().await;
-            if let Some(server_ip) = self.connection_states.get_connected_ip().await {
-                return server_ip;
+            if let Some(state) = self.connection_states.get_connected_ip().await {
+                return state;
             }
             self.scan_network().await;
         }
     }
 }
 
-async fn check_connection(server_ip: String) -> WebSocketStatus {
+async fn check_connection(
+    server_ip: String,
+) -> (
+    WebSocketStatus,
+    Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+) {
     match connect_async(&server_ip).await {
-        Ok((mut ws_stream, _)) => {
-            ws_stream
-                .send(make_disconnect_message(&server_ip))
-                .await
-                .unwrap();
-            ws_stream.flush().await.unwrap();
+        Ok((ws_stream, _)) => {
             // 연결 성공
-            WebSocketStatus::Connected
+            (WebSocketStatus::Connected, Some(ws_stream))
         }
         Err(e) => {
             match e {
                 tungstenite::Error::Io(e) => match e.kind() {
                     std::io::ErrorKind::ConnectionRefused => {
                         // 포트는 닫혔지만 호스트는 존재
-                        WebSocketStatus::ConnectionRefused
+                        (WebSocketStatus::ConnectionRefused, None)
                     }
                     _ => {
                         // 그 외 에러 (호스트가 없거나 네트워크 문제)
-                        WebSocketStatus::Timeout
+                        (WebSocketStatus::Timeout, None)
                     }
                 },
-                _ => WebSocketStatus::Timeout,
+                _ => (WebSocketStatus::Timeout, None),
             }
         }
     }

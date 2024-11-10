@@ -3,6 +3,7 @@ use std::net::UdpSocket;
 use std::{sync::Arc, time::Duration};
 
 use crate::generated::schema::{SaveKey, ServerConnectInfo};
+use crate::helpers::get_internal_websocket::handle_websocket;
 use crate::helpers::get_outer_websocket::wrap_get_outer_websocket;
 use crate::helpers::scan_manager::ScanManager;
 use crate::helpers::{
@@ -324,23 +325,29 @@ pub async fn get_internal_connect(
         return Ok(());
     }
 
-    let server_ip = match connect_info_data.server_ip {
+    match connect_info_data.server_ip {
         "" => {
             server_sender.write().await.is_try_connect = true;
 
-            let server_ip = ScanManager::new(connect_info_data.port).run().await;
+            let (server_ip, ws_stream) = ScanManager::new(connect_info_data.port).run().await;
             server_sender.write().await.is_try_connect = false;
-            server_ip
+            tokio::spawn(async move {
+                if let Err(error) =
+                    handle_websocket(db, server_sender, options, server_ip, ws_stream).await
+                {
+                    log_error!("Error handling websocket: {:?}", error);
+                }
+            });
         }
-        _server_ip => _server_ip.into(),
+        _server_ip => {
+            tokio::spawn(wrap_get_internal_websocket(
+                db.clone(),
+                server_sender.clone(),
+                _server_ip.into(),
+                options.clone(),
+            ));
+        }
     };
-
-    tokio::spawn(wrap_get_internal_websocket(
-        db.clone(),
-        server_sender.clone(),
-        server_ip,
-        options.clone(),
-    ));
 
     Ok(())
 }

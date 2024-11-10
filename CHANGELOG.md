@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.2
+
+* Fixed scan ip for internal client connect when connected server.
+
 ## 0.6.1
 
 * Improve scan ip for internal client connect, change server handle message receiver from broadcast to mpsc.
