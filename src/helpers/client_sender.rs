@@ -58,9 +58,9 @@ impl ClientSenders {
             .expect("Receiver already taken")
     }
 
-    pub fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
+    pub async fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
         let handle_message_sx = self.handle_message_sx.clone();
-        let _ = handle_message_sx.send((data, peer.into()));
+        let _ = handle_message_sx.send((data, peer.into())).await;
     }
 
     pub fn check_client_send_time(&mut self) {
@@ -145,7 +145,7 @@ impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
     async fn send_handle_message(&self, data: Data<'_>, peer: &str) {
         let mut buf = Vec::new();
         data.serialize(&mut buf).unwrap();
-        self.write().await.send_handle_message(buf, peer);
+        self.write().await.send_handle_message(buf, peer).await;
     }
 
     async fn send(&self, peer: &str, message: Message) -> bool {

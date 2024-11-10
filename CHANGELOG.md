@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.4
+
+* Fixed for client_sender's handle message.
+
 ## 0.6.3
 
 * Fixed for scan_manager when is_connected function.
