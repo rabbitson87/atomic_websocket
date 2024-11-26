@@ -1,5 +1,25 @@
 # Changes
 
+## 0.6.11
+
+* Rollback to 0.6.6v.
+
+## 0.6.10
+
+* Remove for server_sender when process dropped.
+
+## 0.6.9
+
+* Fixed for server_sender when process dropped in try_connect condition.
+
+## 0.6.8
+
+* Fixed for server_sender when process dropped in loop checker.
+
+## 0.6.7
+
+* Add for server_sender when process dropped.
+
 ## 0.6.6
 
 * Fixed for add server_ip.
