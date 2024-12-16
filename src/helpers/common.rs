@@ -3,7 +3,7 @@ use std::{error::Error, sync::Arc};
 use bebop::Record;
 use native_db::Database;
 use tokio::sync::RwLock;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{protocol::frame::Payload, Message};
 
 use crate::{
     schema::{Category, Data, Disconnect, Expired, Ping},
@@ -142,7 +142,7 @@ pub fn make_atomic_message(category: u16, mut datas: Vec<u8>) -> Message {
         vec![remainder as u8, quotient as u8]
     };
     byte.append(&mut datas);
-    Message::Binary(byte)
+    Message::Binary(Payload::Vec(byte))
 }
 
 pub fn make_response_message(category: Category, datas: Vec<u8>) -> Message {

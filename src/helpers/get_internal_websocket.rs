@@ -8,7 +8,9 @@ use tokio::{
     sync::{mpsc, RwLock},
     time::{sleep, timeout},
 };
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async, tungstenite::protocol::frame::Payload, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::{
     generated::schema::{Category, SaveKey},
@@ -102,68 +104,70 @@ pub async fn handle_websocket(
         let is_wait_ping = Arc::new(AtomicBool::new(false));
 
         while let Some(Ok(message)) = istream.next().await {
-            let value = message.into_data();
-            let data = match get_data_schema(&value) {
-                Ok(data) => data,
-                Err(e) => {
-                    log_error!("Error getting data schema: {:?}", e);
-                    continue;
-                }
-            };
+            if let Payload::Owned(value) = message.into_data() {
+                let data = match get_data_schema(&value) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        log_error!("Error getting data schema: {:?}", e);
+                        continue;
+                    }
+                };
 
-            let id = id.copy_string();
-            log_debug!("Client receive message: {:?}", data);
-            if data.category == Category::Pong as u16 {
-                if is_first {
-                    is_first = false;
-                    server_sender.send_status(SenderStatus::Connected).await;
+                let id = id.copy_string();
+                log_debug!("Client receive message: {:?}", data);
+                if data.category == Category::Pong as u16 {
+                    if is_first {
+                        is_first = false;
+                        server_sender.send_status(SenderStatus::Connected).await;
+                    }
+                    if !is_wait_ping.is_true() {
+                        is_wait_ping.set_bool(true);
+                        server_sender.write_received_times().await;
+                        let server_sender_clone = server_sender.clone();
+                        let is_wait_ping_clone = is_wait_ping.clone();
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(retry_seconds)).await;
+                            server_sender_clone.send(make_ping_message(&id)).await;
+                            is_wait_ping_clone.set_bool(false);
+                        });
+                    }
+                    continue;
+                } else if data.category == Category::Disconnect as u16 {
+                    let _ = sx
+                        .send(make_disconnect_message(
+                            server_ip
+                                .split("://")
+                                .nth(1)
+                                .unwrap()
+                                .split(":")
+                                .nth(0)
+                                .unwrap(),
+                        ))
+                        .await;
+                    break;
                 }
-                if !is_wait_ping.is_true() {
-                    is_wait_ping.set_bool(true);
-                    server_sender.write_received_times().await;
-                    let server_sender_clone = server_sender.clone();
-                    let is_wait_ping_clone = is_wait_ping.clone();
-                    tokio::spawn(async move {
-                        sleep(Duration::from_secs(retry_seconds)).await;
-                        server_sender_clone.send(make_ping_message(&id)).await;
-                        is_wait_ping_clone.set_bool(false);
-                    });
-                }
-                continue;
-            } else if data.category == Category::Disconnect as u16 {
-                let _ = sx
-                    .send(make_disconnect_message(
-                        server_ip
-                            .split("://")
-                            .nth(1)
-                            .unwrap()
-                            .split(":")
-                            .nth(0)
-                            .unwrap(),
-                    ))
-                    .await;
-                break;
+                server_sender.send_handle_message(data).await;
             }
-            server_sender.send_handle_message(data).await;
         }
     });
 
     while let Some(message) = rx.recv().await {
         match ostream.send(message.clone()).await {
             Ok(_) => {
-                let data = message.into_data();
-                let data = match get_data_schema(&data) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        log_error!("Error getting data schema: {:?}", e);
+                if let Payload::Owned(data) = message.into_data() {
+                    let data = match get_data_schema(&data) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            log_error!("Error getting data schema: {:?}", e);
+                            rx.close();
+                            break;
+                        }
+                    };
+                    log_debug!("Send message: {:?}", data);
+                    if data.category == Category::Disconnect as u16 {
                         rx.close();
                         break;
                     }
-                };
-                log_debug!("Send message: {:?}", data);
-                if data.category == Category::Disconnect as u16 {
-                    rx.close();
-                    break;
                 }
             }
             Err(e) => {
