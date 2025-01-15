@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.13
+
+* Update dependencies.
+
 ## 0.6.12
 
 * Update dependencies.
