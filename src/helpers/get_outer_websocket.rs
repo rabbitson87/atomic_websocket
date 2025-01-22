@@ -1,28 +1,22 @@
-use std::sync::Arc;
-
+use super::types::{RwServerSender, DB};
 use crate::{helpers::get_internal_websocket::handle_websocket, log_error};
-use native_db::Database;
 #[cfg(feature = "native_tls")]
 use native_tls::TlsConnector;
-use tokio::sync::RwLock;
 
 #[cfg(not(feature = "native_tls"))]
 use tokio_tungstenite::connect_async;
 #[cfg(feature = "native_tls")]
 use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 
-use crate::{
-    helpers::{server_sender::ServerSender, traits::StringUtil},
-    server_sender::ClientOptions,
-};
+use crate::{helpers::traits::StringUtil, server_sender::ClientOptions};
 use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::log_debug;
 
 pub async fn wrap_get_outer_websocket(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     options: ClientOptions,
 ) {
     match get_outer_websocket(db, server_sender, options).await {
@@ -35,8 +29,8 @@ pub async fn wrap_get_outer_websocket(
 
 #[cfg(feature = "native_tls")]
 pub async fn get_outer_websocket(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     let server_ip = format!("wss://{}", &options.url);
@@ -70,8 +64,8 @@ pub async fn get_outer_websocket(
 
 #[cfg(not(feature = "native_tls"))]
 pub async fn get_outer_websocket(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     let server_ip = format!("ws://{}", &options.url);

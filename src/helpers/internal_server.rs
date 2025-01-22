@@ -24,10 +24,10 @@ use tokio_tungstenite::{
     tungstenite::{self, Message},
 };
 
-use super::client_sender::ClientSenders;
+use super::{client_sender::ClientSenders, types::RwClientSenders};
 
 pub struct AtomicServer {
-    pub client_senders: Arc<RwLock<ClientSenders>>,
+    pub client_senders: RwClientSenders,
 }
 
 #[derive(Clone)]
@@ -49,7 +49,7 @@ impl AtomicServer {
     pub async fn new(
         addr: &str,
         option: ServerOptions,
-        client_senders: Option<Arc<RwLock<ClientSenders>>>,
+        client_senders: Option<RwClientSenders>,
     ) -> Self {
         let listener = TcpListener::bind(&addr).await.expect("Can't listen");
         let client_senders = match client_senders {
@@ -67,7 +67,7 @@ impl AtomicServer {
     }
 }
 
-pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
+pub async fn loop_client_checker(server_sender: RwClientSenders) {
     let mut interval = tokio::time::interval_at(
         Instant::now() + Duration::from_secs(15),
         Duration::from_secs(15),
@@ -83,7 +83,7 @@ pub async fn loop_client_checker(server_sender: Arc<RwLock<ClientSenders>>) {
 
 pub async fn handle_accept(
     listener: TcpListener,
-    client_senders: Arc<RwLock<ClientSenders>>,
+    client_senders: RwClientSenders,
     option: ServerOptions,
 ) {
     loop {
@@ -108,7 +108,7 @@ pub async fn handle_accept(
 }
 
 pub async fn accept_connection(
-    client_senders: Arc<RwLock<ClientSenders>>,
+    client_senders: RwClientSenders,
     peer: SocketAddr,
     stream: TcpStream,
     option: ServerOptions,
@@ -122,7 +122,7 @@ pub async fn accept_connection(
 }
 
 pub async fn handle_connection(
-    client_senders: Arc<RwLock<ClientSenders>>,
+    client_senders: RwClientSenders,
     peer: SocketAddr,
     stream: TcpStream,
     option: ServerOptions,
@@ -205,7 +205,7 @@ pub async fn handle_connection(
 
 async fn get_id_from_first_message(
     istream: &mut SplitStream<WebSocketStream<TcpStream>>,
-    client_senders: Arc<RwLock<ClientSenders>>,
+    client_senders: RwClientSenders,
     sx: Sender<Message>,
     options: ServerOptions,
 ) -> Option<String> {

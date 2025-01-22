@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.14
+
+* Improve atomic type of db, refactoring types.
+
 ## 0.6.13
 
 * Update dependencies.

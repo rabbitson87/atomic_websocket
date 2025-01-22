@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use client_sender::ClientSenders;
 use helpers::{
     internal_client::{AtomicClient, ClientOptions},
     internal_server::{AtomicServer, ServerOptions},
+    types::DB,
 };
-use native_db::{native_db, Database, ToKey};
+use native_db::{native_db, ToKey};
 use native_model::{native_model, Model};
 use serde::{Deserialize, Serialize};
 
@@ -43,9 +43,13 @@ pub mod common {
     };
     pub use crate::helpers::get_internal_websocket::get_id;
 }
+pub mod types {
+    pub use crate::helpers::types::*;
+}
 
 use server_sender::{ServerSender, ServerSenderTrait};
 use tokio::sync::RwLock;
+use types::{RwClientSenders, RwServerSender};
 
 mod generated;
 mod helpers;
@@ -67,16 +71,13 @@ enum AtomicWebsocketType {
 }
 
 impl AtomicWebsocket {
-    pub async fn get_internal_client(
-        db: Arc<RwLock<Database<'static>>>,
-        options: ClientOptions,
-    ) -> AtomicClient {
+    pub async fn get_internal_client(db: DB, options: ClientOptions) -> AtomicClient {
         get_client(db, options, AtomicWebsocketType::Internal, None).await
     }
     pub async fn get_internal_client_with_server_sender(
-        db: Arc<RwLock<Database<'static>>>,
+        db: DB,
         options: ClientOptions,
-        server_sender: Arc<RwLock<ServerSender>>,
+        server_sender: RwServerSender,
     ) -> AtomicClient {
         get_client(
             db,
@@ -87,17 +88,14 @@ impl AtomicWebsocket {
         .await
     }
 
-    pub async fn get_outer_client(
-        db: Arc<RwLock<Database<'static>>>,
-        options: ClientOptions,
-    ) -> AtomicClient {
+    pub async fn get_outer_client(db: DB, options: ClientOptions) -> AtomicClient {
         get_client(db, options, AtomicWebsocketType::Outer, None).await
     }
 
     pub async fn get_outer_client_with_server_sender(
-        db: Arc<RwLock<Database<'static>>>,
+        db: DB,
         options: ClientOptions,
-        server_sender: Arc<RwLock<ServerSender>>,
+        server_sender: RwServerSender,
     ) -> AtomicClient {
         get_client(db, options, AtomicWebsocketType::Outer, Some(server_sender)).await
     }
@@ -109,17 +107,17 @@ impl AtomicWebsocket {
     pub async fn get_internal_server_with_client_senders(
         addr: String,
         option: ServerOptions,
-        client_senders: Arc<RwLock<ClientSenders>>,
+        client_senders: RwClientSenders,
     ) -> AtomicServer {
         AtomicServer::new(&addr, option, Some(client_senders)).await
     }
 }
 
 async fn get_client(
-    db: Arc<RwLock<Database<'static>>>,
+    db: DB,
     options: ClientOptions,
     atomic_websocket_type: AtomicWebsocketType,
-    server_sender: Option<Arc<RwLock<ServerSender>>>,
+    server_sender: Option<RwServerSender>,
 ) -> AtomicClient {
     let mut server_sender = match server_sender {
         Some(server_sender) => {

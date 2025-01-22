@@ -1,11 +1,10 @@
 use std::sync::{atomic::AtomicBool, Arc};
 
 use futures_util::{SinkExt, StreamExt};
-use native_db::Database;
 use std::time::Duration;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, RwLock},
+    sync::mpsc,
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
@@ -14,17 +13,20 @@ use crate::{
     generated::schema::{Category, SaveKey},
     helpers::{
         common::{get_data_schema, make_disconnect_message, make_ping_message},
-        server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
+        server_sender::{SenderStatus, ServerSenderTrait},
         traits::{atomic::FlagAtomic, StringUtil},
     },
     log_debug, log_error, Settings,
 };
 
-use super::internal_client::ClientOptions;
+use super::{
+    internal_client::ClientOptions,
+    types::{RwServerSender, DB},
+};
 
 pub async fn wrap_get_internal_websocket(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     server_ip: String,
     options: ClientOptions,
 ) -> bool {
@@ -38,8 +40,8 @@ pub async fn wrap_get_internal_websocket(
 }
 
 pub async fn get_internal_websocket(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     server_ip: String,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
@@ -74,8 +76,8 @@ pub async fn get_internal_websocket(
 }
 
 pub async fn handle_websocket(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     options: ClientOptions,
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -177,8 +179,8 @@ pub async fn handle_websocket(
     Ok(())
 }
 
-pub async fn get_id(db: Arc<RwLock<Database<'static>>>) -> String {
-    let db = db.read().await;
+pub async fn get_id(db: DB) -> String {
+    let db = db.lock().await;
     let reader = db.r_transaction().unwrap();
 
     let mut return_string = String::new();

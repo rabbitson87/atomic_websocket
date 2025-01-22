@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::net::UdpSocket;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use crate::generated::schema::{SaveKey, ServerConnectInfo};
 use crate::helpers::get_internal_websocket::handle_websocket;
@@ -9,16 +9,16 @@ use crate::helpers::scan_manager::ScanManager;
 use crate::helpers::{
     common::{get_setting_by_key, make_ping_message},
     get_internal_websocket::{get_id, wrap_get_internal_websocket},
-    server_sender::{SenderStatus, ServerSender, ServerSenderTrait},
+    server_sender::{SenderStatus, ServerSenderTrait},
     traits::date_time::now,
 };
 use crate::{log_debug, log_error, Settings};
 use bebop::Record;
-use native_db::Database;
 
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::RwLock;
 use tokio::time::{Instant, MissedTickBehavior};
+
+use super::types::{RwServerSender, DB};
 
 #[derive(Clone)]
 pub struct ClientOptions {
@@ -46,12 +46,12 @@ impl Default for ClientOptions {
 }
 
 pub struct AtomicClient {
-    pub server_sender: Arc<RwLock<ServerSender>>,
+    pub server_sender: RwServerSender,
     pub options: ClientOptions,
 }
 
 impl AtomicClient {
-    pub async fn internal_initialize(&self, db: Arc<RwLock<Database<'static>>>) {
+    pub async fn internal_initialize(&self, db: DB) {
         self.regist_id(db.clone()).await;
         tokio::spawn(internal_ping_loop_cheker(
             self.server_sender.clone(),
@@ -59,7 +59,7 @@ impl AtomicClient {
         ));
     }
 
-    pub async fn outer_initialize(&self, db: Arc<RwLock<Database<'static>>>) {
+    pub async fn outer_initialize(&self, db: DB) {
         self.regist_id(db.clone()).await;
         tokio::spawn(outer_ping_loop_cheker(
             self.server_sender.clone(),
@@ -67,23 +67,20 @@ impl AtomicClient {
         ));
     }
 
-    pub async fn get_outer_connect(
-        &self,
-        db: Arc<RwLock<Database<'static>>>,
-    ) -> Result<(), Box<dyn Error>> {
+    pub async fn get_outer_connect(&self, db: DB) -> Result<(), Box<dyn Error>> {
         get_outer_connect(db, self.server_sender.clone(), self.options.clone()).await
     }
 
     pub async fn get_internal_connect(
         &self,
         input: Option<ServerConnectInfo<'_>>,
-        db: Arc<RwLock<Database<'static>>>,
+        db: DB,
     ) -> Result<(), Box<dyn Error>> {
         get_internal_connect(input, db, self.server_sender.clone(), self.options.clone()).await
     }
 
-    pub async fn regist_id(&self, db: Arc<RwLock<Database<'static>>>) {
-        let db = db.read().await;
+    pub async fn regist_id(&self, db: DB) {
+        let db = db.lock().await;
         let reader = db.r_transaction().unwrap();
         let data = reader
             .get()
@@ -113,10 +110,7 @@ impl AtomicClient {
     }
 }
 
-async fn internal_ping_loop_cheker(
-    server_sender: Arc<RwLock<ServerSender>>,
-    options: ClientOptions,
-) {
+async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
     let retry_seconds = options.retry_seconds;
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
@@ -156,7 +150,7 @@ async fn internal_ping_loop_cheker(
                     info.server_ip = "".into();
                     let mut value = Vec::new();
                     info.serialize(&mut value).unwrap();
-                    let db = db.read().await;
+                    let db = db.lock().await;
                     let writer = db.rw_transaction().unwrap();
                     writer
                         .update::<Settings>(
@@ -195,7 +189,7 @@ async fn internal_ping_loop_cheker(
     }
 }
 
-async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, options: ClientOptions) {
+async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
     let retry_seconds = options.retry_seconds;
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
@@ -240,8 +234,8 @@ async fn outer_ping_loop_cheker(server_sender: Arc<RwLock<ServerSender>>, option
 }
 
 pub async fn get_outer_connect(
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
     if server_sender.is_valid_server_ip().await {
@@ -263,8 +257,8 @@ pub async fn get_outer_connect(
 
 pub async fn get_internal_connect(
     input: Option<ServerConnectInfo<'_>>,
-    db: Arc<RwLock<Database<'static>>>,
-    server_sender: Arc<RwLock<ServerSender>>,
+    db: DB,
+    server_sender: RwServerSender,
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
     if server_sender.read().await.is_try_connect {
@@ -280,7 +274,7 @@ pub async fn get_internal_connect(
 
     if input.is_some() && server_connect_info.is_none() {
         let input = input.as_ref().unwrap();
-        let db_clone = db.read().await;
+        let db_clone = db.lock().await;
         let writer = db_clone.rw_transaction()?;
         let mut value = Vec::new();
         ServerConnectInfo {

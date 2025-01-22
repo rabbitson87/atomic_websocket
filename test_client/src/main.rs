@@ -8,14 +8,15 @@ use std::{
 
 use atomic_websocket::{
     common::{get_id, make_response_message},
-    external::native_db::{Builder, Database, Models},
+    external::native_db::{Builder, Models},
     schema::{AppStartup, AppStartupOutput, Category, Data, ServerConnectInfo},
     server_sender::{ClientOptions, SenderStatus, ServerSender, ServerSenderTrait},
+    types::{RwServerSender, DB},
     AtomicWebsocket, Settings,
 };
 use bebop::Record;
 use tokio::{
-    sync::{mpsc::Receiver, RwLock},
+    sync::{mpsc::Receiver, Mutex, RwLock},
     time::sleep,
 };
 
@@ -156,10 +157,10 @@ pub fn make_models() -> &'static Models {
     })
 }
 
-pub fn db() -> &'static Arc<RwLock<Database<'static>>> {
-    static BUILDER: OnceLock<Arc<RwLock<Database<'static>>>> = OnceLock::new();
+pub fn db() -> &'static DB {
+    static BUILDER: OnceLock<DB> = OnceLock::new();
     BUILDER.get_or_init(|| {
-        Arc::new(RwLock::new(
+        Arc::new(Mutex::new(
             Builder::new()
                 .create(&make_models(), get_db_path().unwrap())
                 .unwrap(),
@@ -167,8 +168,8 @@ pub fn db() -> &'static Arc<RwLock<Database<'static>>> {
     })
 }
 
-pub fn server_sender() -> &'static Arc<RwLock<ServerSender>> {
-    static BUILDER: OnceLock<Arc<RwLock<ServerSender>>> = OnceLock::new();
+pub fn server_sender() -> &'static RwServerSender {
+    static BUILDER: OnceLock<RwServerSender> = OnceLock::new();
     BUILDER.get_or_init(|| {
         Arc::new(RwLock::new(ServerSender::new(
             db().clone(),

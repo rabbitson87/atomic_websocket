@@ -1,12 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bebop::Record;
 use tokio::{
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        RwLock,
-    },
+    sync::mpsc::{self, Receiver, Sender},
     time::sleep,
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -17,7 +14,7 @@ use crate::{
     schema::Data,
 };
 
-use super::{common::make_expired_output_message, traits::StringUtil};
+use super::{common::make_expired_output_message, traits::StringUtil, types::RwClientSenders};
 
 pub struct ClientSenders {
     lists: Vec<ClientSender>,
@@ -133,7 +130,7 @@ pub trait ClientSendersTrait {
 }
 
 #[async_trait]
-impl ClientSendersTrait for Arc<RwLock<ClientSenders>> {
+impl ClientSendersTrait for RwClientSenders {
     async fn add(&self, peer: &str, sx: Sender<Message>) {
         self.write().await.add(peer, sx).await;
     }

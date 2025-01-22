@@ -1,13 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bebop::Record;
-use native_db::Database;
 use tokio::{
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        RwLock,
-    },
+    sync::mpsc::{self, Receiver, Sender},
     time::sleep,
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -23,7 +19,11 @@ use crate::{
 
 use crate::helpers::traits::date_time::now;
 
-use super::{common::make_disconnect_message, internal_client::ClientOptions};
+use super::{
+    common::make_disconnect_message,
+    internal_client::ClientOptions,
+    types::{RwServerSender, DB},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SenderStatus {
@@ -34,8 +34,8 @@ pub enum SenderStatus {
 
 pub struct ServerSender {
     sx: Option<mpsc::Sender<Message>>,
-    pub db: Arc<RwLock<Database<'static>>>,
-    pub server_sender: Option<Arc<RwLock<ServerSender>>>,
+    pub db: DB,
+    pub server_sender: Option<RwServerSender>,
     pub server_ip: String,
     pub server_received_times: i64,
     status_tx: Sender<SenderStatus>,
@@ -47,11 +47,7 @@ pub struct ServerSender {
 }
 
 impl ServerSender {
-    pub fn new(
-        db: Arc<RwLock<Database<'static>>>,
-        server_ip: String,
-        options: ClientOptions,
-    ) -> Self {
+    pub fn new(db: DB, server_ip: String, options: ClientOptions) -> Self {
         let (status_tx, status_rx) = mpsc::channel(8);
         let (handle_message_tx, handle_message_rx) = mpsc::channel(8);
 
@@ -77,7 +73,7 @@ impl ServerSender {
             .take()
             .expect("Receiver already taken")
     }
-    pub fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
+    pub fn regist(&mut self, server_sender: RwServerSender) {
         self.server_sender = Some(server_sender);
     }
     fn sx_drop(&mut self) {
@@ -173,7 +169,7 @@ pub trait ServerSenderTrait {
     async fn get_status_receiver(&self) -> Receiver<SenderStatus>;
     async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>>;
     async fn send(&self, message: Message);
-    async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>);
+    async fn regist(&mut self, server_sender: RwServerSender);
     async fn is_valid_server_ip(&self) -> bool;
     async fn remove_ip(&self);
     async fn remove_ip_if_valid_server_ip(&self, server_ip: &str);
@@ -181,7 +177,7 @@ pub trait ServerSenderTrait {
 }
 
 #[async_trait]
-impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
+impl ServerSenderTrait for RwServerSender {
     async fn add(&self, sx: mpsc::Sender<Message>, server_ip: &str) {
         let mut clone = self.write().await;
         clone.add(sx, server_ip.into());
@@ -198,7 +194,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
                     None
                 }
             };
-        let db = db.read().await;
+        let db = db.lock().await;
         let writer = db.rw_transaction().unwrap();
         match server_connect_info {
             Some(before_data) => {
@@ -261,7 +257,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
         self.write().await.send(message).await;
     }
 
-    async fn regist(&mut self, server_sender: Arc<RwLock<ServerSender>>) {
+    async fn regist(&mut self, server_sender: RwServerSender) {
         self.write().await.regist(server_sender);
     }
 
@@ -301,7 +297,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
                 info.server_ip = "".into();
                 let mut value = Vec::new();
                 info.serialize(&mut value).unwrap();
-                let db = db.read().await;
+                let db = db.lock().await;
                 let writer = db.rw_transaction().unwrap();
                 writer
                     .update::<Settings>(
@@ -313,6 +309,7 @@ impl ServerSenderTrait for Arc<RwLock<ServerSender>> {
                     )
                     .unwrap();
                 writer.commit().unwrap();
+                drop(db);
             }
         }
     }

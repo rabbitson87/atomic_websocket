@@ -7,3 +7,4 @@ pub mod internal_server;
 pub mod scan_manager;
 pub mod server_sender;
 pub mod traits;
+pub mod types;

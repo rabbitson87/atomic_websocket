@@ -1,8 +1,6 @@
-use std::{error::Error, sync::Arc};
+use std::error::Error;
 
 use bebop::Record;
-use native_db::Database;
-use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 use crate::{
@@ -10,7 +8,7 @@ use crate::{
     Settings,
 };
 
-use super::traits::StringUtil;
+use super::{traits::StringUtil, types::DB};
 
 #[cfg(feature = "rinf")]
 #[cfg(not(feature = "debug"))]
@@ -78,21 +76,15 @@ macro_rules! log_error {
     };
 }
 
-pub async fn get_setting_by_key(
-    db: Arc<RwLock<Database<'static>>>,
-    key: String,
-) -> Result<Option<Settings>, Box<dyn Error>> {
-    let db = db.read().await;
+pub async fn get_setting_by_key(db: DB, key: String) -> Result<Option<Settings>, Box<dyn Error>> {
+    let db = db.lock().await;
     let reader = db.r_transaction()?;
 
     Ok(reader.get().primary::<Settings>(key)?)
 }
 
-pub async fn set_setting(
-    db: Arc<RwLock<Database<'static>>>,
-    settings: Settings,
-) -> Result<bool, Box<dyn Error>> {
-    let db = db.read().await;
+pub async fn set_setting(db: DB, settings: Settings) -> Result<bool, Box<dyn Error>> {
+    let db = db.lock().await;
     let reader = db.r_transaction()?;
     let writer = db.rw_transaction()?;
 
