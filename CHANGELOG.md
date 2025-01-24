@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.15
+
+* Change dependency: Replace OpenSSL with Rustls
+
 ## 0.6.14
 
 * Improve atomic type of db, refactoring types.

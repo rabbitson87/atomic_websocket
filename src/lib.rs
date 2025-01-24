@@ -15,8 +15,8 @@ pub mod external {
     pub use nanoid;
     pub use native_db;
     pub use native_model;
-    #[cfg(feature = "native_tls")]
-    pub use native_tls;
+    #[cfg(feature = "rustls")]
+    pub use rustls;
     pub use tokio;
     pub use tokio_tungstenite;
 }

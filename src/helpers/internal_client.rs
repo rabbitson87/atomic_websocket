@@ -27,7 +27,7 @@ pub struct ClientOptions {
     pub retry_seconds: u64,
     pub use_keep_ip: bool,
     pub connect_timeout_seconds: u64,
-    #[cfg(feature = "native_tls")]
+    #[cfg(feature = "rustls")]
     pub use_tls: bool,
 }
 
@@ -39,7 +39,7 @@ impl Default for ClientOptions {
             retry_seconds: 30,
             use_keep_ip: false,
             connect_timeout_seconds: 3,
-            #[cfg(feature = "native_tls")]
+            #[cfg(feature = "rustls")]
             use_tls: true,
         }
     }
@@ -60,6 +60,8 @@ impl AtomicClient {
     }
 
     pub async fn outer_initialize(&self, db: DB) {
+        #[cfg(feature = "rustls")]
+        self.initial_rustls();
         self.regist_id(db.clone()).await;
         tokio::spawn(outer_ping_loop_cheker(
             self.server_sender.clone(),
@@ -77,6 +79,15 @@ impl AtomicClient {
         db: DB,
     ) -> Result<(), Box<dyn Error>> {
         get_internal_connect(input, db, self.server_sender.clone(), self.options.clone()).await
+    }
+
+    #[cfg(feature = "rustls")]
+    pub fn initial_rustls(&self) {
+        use rustls::crypto::{ring, CryptoProvider};
+        if let None = CryptoProvider::get_default() {
+            let provider = ring::default_provider();
+            provider.install_default().unwrap();
+        }
     }
 
     pub async fn regist_id(&self, db: DB) {
