@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.16
+
+* Fixed prevent duplicate client reconnection from same IP
+
 ## 0.6.15
 
 * Change dependency: Replace OpenSSL with Rustls

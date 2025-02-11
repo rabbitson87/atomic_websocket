@@ -82,6 +82,9 @@ pub async fn handle_websocket(
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
+    if !server_sender.is_need_connect(&server_ip).await {
+        return Ok(());
+    }
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 

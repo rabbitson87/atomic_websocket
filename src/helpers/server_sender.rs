@@ -174,6 +174,7 @@ pub trait ServerSenderTrait {
     async fn remove_ip(&self);
     async fn remove_ip_if_valid_server_ip(&self, server_ip: &str);
     async fn write_received_times(&self);
+    async fn is_need_connect(&self, server_ip: &str) -> bool;
 }
 
 #[async_trait]
@@ -316,6 +317,11 @@ impl ServerSenderTrait for RwServerSender {
 
     async fn write_received_times(&self) {
         self.write().await.server_received_times = now().timestamp();
+    }
+
+    async fn is_need_connect(&self, server_ip: &str) -> bool {
+        let clone = self.read().await;
+        server_ip != &clone.server_ip
     }
 }
 
