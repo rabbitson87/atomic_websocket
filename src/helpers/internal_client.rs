@@ -334,12 +334,12 @@ pub async fn get_internal_connect(
             server_sender.write().await.is_try_connect = true;
 
             let (server_ip, ws_stream) = ScanManager::new(connect_info_data.port).run().await;
-            server_sender.write().await.is_try_connect = false;
             tokio::spawn(async move {
                 if let Err(error) =
-                    handle_websocket(db, server_sender, options, server_ip, ws_stream).await
+                    handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream).await
                 {
                     log_error!("Error handling websocket: {:?}", error);
+                    server_sender.write().await.is_try_connect = false;
                 }
             });
         }

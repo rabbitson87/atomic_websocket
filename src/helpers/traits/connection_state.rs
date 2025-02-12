@@ -65,11 +65,9 @@ impl ConnectionManager for Arc<RwLock<HashMap<String, ConnectionState>>> {
     }
 
     async fn is_connected(&self) -> bool {
-        for (_server_ip, state) in self.write().await.iter_mut() {
-            if state.status == WebSocketStatus::Connected {
-                return true;
-            }
-        }
-        false
+        self.read()
+            .await
+            .iter()
+            .any(|(_, state)| state.status == WebSocketStatus::Connected)
     }
 }

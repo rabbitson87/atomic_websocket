@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.19
+
+* Improve client scan logic.
+
 ## 0.6.18
 
 * Improve client keepalive connect when no server_ip.

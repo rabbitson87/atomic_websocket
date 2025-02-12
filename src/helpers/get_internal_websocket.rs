@@ -153,6 +153,7 @@ pub async fn handle_websocket(
         }
     });
 
+    server_sender.write().await.is_try_connect = false;
     while let Some(message) = rx.recv().await {
         match ostream.send(message.clone()).await {
             Ok(_) => {
