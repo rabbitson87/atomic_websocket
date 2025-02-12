@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.18
+
+* Improve client keepalive connect when no server_ip.
+
 ## 0.6.17
 
 * Improve client keepalive connect.
