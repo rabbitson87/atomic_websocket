@@ -134,7 +134,7 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
         interval.tick().await;
         let server_sender_read = server_sender.read().await;
         if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 3)
+            && server_sender_read.server_received_times + (retry_seconds as i64 * 4)
                 < now().timestamp()
             || server_sender_read.server_ip.is_empty()
         {
@@ -183,7 +183,7 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
                 let _ = get_internal_connect(None, db, server_sender, options).await;
                 true
             });
-        } else if server_sender_read.server_received_times + (retry_seconds as i64 * 2)
+        } else if server_sender_read.server_received_times + (retry_seconds as i64)
             < now().timestamp()
         {
             log_debug!(

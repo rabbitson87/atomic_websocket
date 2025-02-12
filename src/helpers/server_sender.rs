@@ -120,40 +120,43 @@ impl ServerSender {
                     _ => self.options.retry_seconds - 1,
                 },
             };
+
             match sender.send(message.clone()).await {
-                Ok(_) => {}
+                Ok(_) => return,
                 Err(e) => {
-                    log_error!("Error server sending message: {:?}", e);
+                    log_error!("Initial send error: {:?}", e);
+                }
+            }
+
+            loop {
+                if count >= limit_count {
                     self.send_status(SenderStatus::Disconnected);
 
-                    loop {
-                        match sx.clone().send(message.clone()).await {
-                            Ok(_) => {
-                                break;
-                            }
-                            Err(e) => {
-                                if count > limit_count {
-                                    tokio::spawn(wrap_get_internal_websocket(
-                                        self.db.clone(),
-                                        self.server_sender.as_ref().unwrap().clone(),
-                                        self.server_ip.copy_string(),
-                                        self.options.clone(),
-                                    ));
-                                    break;
-                                }
+                    if let Some(server_sender) = &self.server_sender {
+                        tokio::spawn(wrap_get_internal_websocket(
+                            self.db.clone(),
+                            server_sender.clone(),
+                            self.server_ip.copy_string(),
+                            self.options.clone(),
+                        ));
+                    }
+                    break;
+                }
 
-                                log_error!(
-                                    "Error sending message (attempt {}): {:?}",
-                                    count + 1,
-                                    e
-                                );
-                                count += 1;
+                backoff = std::cmp::min(backoff * 2, max_backoff);
+                sleep(backoff).await;
 
-                                // Exponential backoff with max limit
-                                backoff = std::cmp::min(backoff * 2, max_backoff);
-                                sleep(backoff).await;
-                            }
-                        };
+                count += 1;
+                log_debug!("Retrying send (attempt {})", count + 1);
+
+                match sx.clone().send(message.clone()).await {
+                    Ok(_) => {
+                        log_debug!("Send succeeded on retry {}", count);
+                        return;
+                    }
+                    Err(e) => {
+                        log_error!("Retry {} failed: {:?}", count, e);
+                        continue;
                     }
                 }
             }

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.17
+
+* Improve client keepalive connect.
+
 ## 0.6.16
 
 * Fixed prevent duplicate client reconnection from same IP
