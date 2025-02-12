@@ -92,7 +92,8 @@ pub async fn handle_websocket(
     let id = get_id(db.clone()).await;
     server_sender.add(sx.clone(), &server_ip).await;
 
-    if options.use_ping {
+    let use_ping = options.use_ping;
+    if use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
         server_sender.send(make_ping_message(&id)).await;
     }
@@ -107,6 +108,7 @@ pub async fn handle_websocket(
         let is_wait_ping = Arc::new(AtomicBool::new(false));
 
         while let Some(Ok(message)) = istream.next().await {
+            server_sender.write_received_times().await;
             let value = message.into_data();
             let data = match get_data_schema(&value) {
                 Ok(data) => data,
@@ -116,16 +118,16 @@ pub async fn handle_websocket(
                 }
             };
 
+            if is_first {
+                is_first = false;
+                server_sender.send_status(SenderStatus::Connected).await;
+                server_sender.write().await.is_try_connect = false;
+            }
             let id = id.copy_string();
             log_debug!("Client receive message: {:?}", data);
             if data.category == Category::Pong as u16 {
-                if is_first {
-                    is_first = false;
-                    server_sender.send_status(SenderStatus::Connected).await;
-                }
                 if !is_wait_ping.is_true() {
                     is_wait_ping.set_bool(true);
-                    server_sender.write_received_times().await;
                     let server_sender_clone = server_sender.clone();
                     let is_wait_ping_clone = is_wait_ping.clone();
                     tokio::spawn(async move {
@@ -153,7 +155,6 @@ pub async fn handle_websocket(
         }
     });
 
-    server_sender.write().await.is_try_connect = false;
     while let Some(message) = rx.recv().await {
         match ostream.send(message.clone()).await {
             Ok(_) => {

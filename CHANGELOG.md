@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.20
+
+* Improve client connection stability when write received time with message from server.
+
 ## 0.6.19
 
 * Improve client scan logic.

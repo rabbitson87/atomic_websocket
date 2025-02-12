@@ -211,9 +211,7 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
     loop {
         interval.tick().await;
         let server_sender_read = server_sender.read().await;
-        if server_sender_read.server_received_times + 90 < now().timestamp()
-            || server_sender_read.server_ip.is_empty()
-        {
+        if server_sender_read.server_received_times + 90 < now().timestamp() {
             drop(server_sender_read);
             server_sender.send_status(SenderStatus::Disconnected).await;
 
