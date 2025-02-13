@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.21
+
+* Fixed prevent retry connect when connecting progress.
+
 ## 0.6.20
 
 * Improve client connection stability when write received time with message from server.
