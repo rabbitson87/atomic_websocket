@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.22
+
+* Fixed prevent retry connect when connected to server.
+
 ## 0.6.21
 
 * Fixed prevent retry connect when connecting progress.

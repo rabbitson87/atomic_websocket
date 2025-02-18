@@ -72,6 +72,7 @@ pub async fn get_internal_websocket(
         }
     }
     log_debug!("Failed to server connect to {}", server_ip);
+    server_sender.write().await.is_try_connect = false;
     Ok(())
 }
 
@@ -121,7 +122,6 @@ pub async fn handle_websocket(
             if is_first {
                 is_first = false;
                 server_sender.send_status(SenderStatus::Connected).await;
-                server_sender.write().await.is_try_connect = false;
             }
             let id = id.copy_string();
             log_debug!("Client receive message: {:?}", data);
@@ -181,6 +181,7 @@ pub async fn handle_websocket(
     }
     log_debug!("WebSocket closed");
     ostream.flush().await?;
+    server_sender.write().await.is_try_connect = false;
     Ok(())
 }
 
