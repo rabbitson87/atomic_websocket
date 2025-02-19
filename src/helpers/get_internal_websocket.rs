@@ -53,14 +53,18 @@ pub async fn get_internal_websocket(
     .await
     {
         Ok(Ok((ws_stream, _))) => {
-            handle_websocket(
+            if let Err(err) = handle_websocket(
                 db,
                 server_sender.clone(),
                 options,
                 server_ip.copy_string(),
                 ws_stream,
             )
-            .await?
+            .await
+            {
+                server_sender.write().await.is_try_connect = false;
+                log_error!("Error handling websocket: {:?}", err);
+            }
         }
         Err(e) => {
             server_sender.remove_ip_if_valid_server_ip(&server_ip).await;

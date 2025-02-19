@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.23
+
+* Fixed release connect when error in connect logic.
+
 ## 0.6.22
 
 * Fixed prevent retry connect when connected to server.
