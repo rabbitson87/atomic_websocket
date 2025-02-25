@@ -76,7 +76,6 @@ pub async fn get_internal_websocket(
         }
     }
     log_debug!("Failed to server connect to {}", server_ip);
-    server_sender.write().await.is_try_connect = false;
     Ok(())
 }
 

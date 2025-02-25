@@ -12,10 +12,11 @@ pub async fn wrap_get_outer_websocket(
     server_sender: RwServerSender,
     options: ClientOptions,
 ) {
-    match get_outer_websocket(db, server_sender, options).await {
+    match get_outer_websocket(db, server_sender.clone(), options).await {
         Ok(_) => (),
         Err(e) => {
             log_error!("Error getting websocket: {:?}", e);
+            server_sender.write().await.is_try_connect = false;
         }
     }
 }
