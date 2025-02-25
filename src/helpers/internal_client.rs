@@ -327,7 +327,6 @@ pub async fn get_internal_connect(
         return Ok(());
     }
 
-    server_sender.write().await.is_try_connect = true;
     match connect_info_data.server_ip {
         "" => {
             let (server_ip, ws_stream) = ScanManager::new(connect_info_data.port).run().await;

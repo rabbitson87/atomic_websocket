@@ -324,7 +324,7 @@ impl ServerSenderTrait for RwServerSender {
 
     async fn is_need_connect(&self, server_ip: &str) -> bool {
         let clone = self.read().await;
-        server_ip != &clone.server_ip
+        server_ip != &clone.server_ip && !clone.is_try_connect
     }
 }
 

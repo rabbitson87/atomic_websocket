@@ -90,6 +90,8 @@ pub async fn handle_websocket(
     if !server_sender.is_need_connect(&server_ip).await {
         return Ok(());
     }
+
+    server_sender.write().await.is_try_connect = true;
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 

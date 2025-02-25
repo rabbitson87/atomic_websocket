@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.24
+
+* Fixed release connect when duplicated connect logic.
+
 ## 0.6.23
 
 * Fixed release connect when error in connect logic.
