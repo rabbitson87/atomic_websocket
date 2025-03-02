@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.26
+
+* Fixed get_ip_address for local wifi.
+
 ## 0.6.25
 
 * Fixed remove release connect when connect failed.

@@ -358,10 +358,6 @@ pub fn get_ip_address() -> String {
         Ok(socket) => socket,
         Err(_) => return "".into(),
     };
-    match socket.connect("8.8.8.8:80") {
-        Ok(_) => {}
-        Err(_) => return "".into(),
-    };
     let addr = match socket.local_addr() {
         Ok(addr) => addr,
         Err(_) => return "".into(),
