@@ -1,3 +1,9 @@
+//! Internal WebSocket connection handling for atomic_websocket clients.
+//!
+//! This module provides functionality for establishing and maintaining WebSocket
+//! connections to servers, including connection setup, message handling, and
+//! automatic reconnection logic.
+
 use std::sync::{atomic::AtomicBool, Arc};
 
 use futures_util::{SinkExt, StreamExt};
@@ -24,6 +30,20 @@ use super::{
     types::{RwServerSender, DB},
 };
 
+/// Wrapper function for establishing an internal WebSocket connection.
+///
+/// Handles errors from the connection attempt and logs them appropriately.
+///
+/// # Arguments
+///
+/// * `db` - Database instance for storing connection state
+/// * `server_sender` - Server sender for message handling
+/// * `server_ip` - Server address to connect to
+/// * `options` - Client connection options
+///
+/// # Returns
+///
+/// `true` if the connection was successfully established, `false` otherwise
 pub async fn wrap_get_internal_websocket(
     db: DB,
     server_sender: RwServerSender,
@@ -39,6 +59,21 @@ pub async fn wrap_get_internal_websocket(
     }
 }
 
+/// Establishes a WebSocket connection to an internal server.
+///
+/// Attempts to connect to the specified server with a timeout, then hands off
+/// the connection to the WebSocket handler if successful.
+///
+/// # Arguments
+///
+/// * `db` - Database instance for storing connection state
+/// * `server_sender` - Server sender for message handling
+/// * `server_ip` - Server address to connect to
+/// * `options` - Client connection options
+///
+/// # Returns
+///
+/// A Result indicating whether the connection process completed successfully
 pub async fn get_internal_websocket(
     db: DB,
     server_sender: RwServerSender,
@@ -79,6 +114,22 @@ pub async fn get_internal_websocket(
     Ok(())
 }
 
+/// Handles an established WebSocket connection.
+///
+/// Sets up bidirectional message handling between the client and server,
+/// including automatic ping/pong for connection health monitoring.
+///
+/// # Arguments
+///
+/// * `db` - Database instance for storing connection state
+/// * `server_sender` - Server sender for message handling
+/// * `options` - Client connection options
+/// * `server_ip` - Server address connected to
+/// * `ws_stream` - Established WebSocket stream
+///
+/// # Returns
+///
+/// A Result indicating whether the connection handling completed successfully
 pub async fn handle_websocket(
     db: DB,
     server_sender: RwServerSender,
@@ -108,6 +159,8 @@ pub async fn handle_websocket(
     let mut is_first = true;
     let server_sender_clone = server_sender.clone();
     let server_ip_clone = server_ip.copy_string();
+
+    // Spawn a task to handle incoming messages
     tokio::spawn(async move {
         let server_ip = server_ip_clone;
         let server_sender = server_sender_clone;
@@ -135,6 +188,7 @@ pub async fn handle_websocket(
                     is_wait_ping.set_bool(true);
                     let server_sender_clone = server_sender.clone();
                     let is_wait_ping_clone = is_wait_ping.clone();
+                    // Schedule the next ping after receiving a pong
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(retry_seconds)).await;
                         server_sender_clone.send(make_ping_message(&id)).await;
@@ -160,6 +214,7 @@ pub async fn handle_websocket(
         }
     });
 
+    // Handle outgoing messages
     while let Some(message) = rx.recv().await {
         match ostream.send(message.clone()).await {
             Ok(_) => {
@@ -190,6 +245,15 @@ pub async fn handle_websocket(
     Ok(())
 }
 
+/// Retrieves the client identifier from the database.
+///
+/// # Arguments
+///
+/// * `db` - Database instance
+///
+/// # Returns
+///
+/// The client identifier as a string
 pub async fn get_id(db: DB) -> String {
     let db = db.lock().await;
     let reader = db.r_transaction().unwrap();

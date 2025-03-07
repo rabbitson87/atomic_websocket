@@ -1,3 +1,9 @@
+//! WebSocket server implementation for atomic_websocket.
+//!
+//! This module provides the server-side functionality for accepting and managing
+//! WebSocket connections, including client tracking, message routing, and automatic
+//! ping/pong handling.
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::{
@@ -26,13 +32,24 @@ use tokio_tungstenite::{
 
 use super::{client_sender::ClientSenders, types::RwClientSenders};
 
+/// WebSocket server implementation for accepting and managing client connections.
+///
+/// Manages WebSocket client connections and routes messages between clients.
 pub struct AtomicServer {
+    /// Collection of connected clients
     pub client_senders: RwClientSenders,
 }
 
+/// Configuration options for the WebSocket server.
+///
+/// Controls aspects of server behavior such as ping handling.
 #[derive(Clone)]
 pub struct ServerOptions {
+    /// Whether to automatically respond to ping messages with pongs
     pub use_ping: bool,
+
+    /// Category ID to use when proxying ping messages instead of responding directly
+    /// A value of -1 disables ping proxying
     pub proxy_ping: i16,
 }
 
@@ -46,6 +63,24 @@ impl Default for ServerOptions {
 }
 
 impl AtomicServer {
+    /// Creates a new WebSocket server instance.
+    ///
+    /// Binds to the specified address and starts accepting connections.
+    /// Also spawns background tasks for connection handling and client tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - Address to bind the server to (e.g., "0.0.0.0:9000")
+    /// * `option` - Server configuration options
+    /// * `client_senders` - Optional existing ClientSenders instance
+    ///
+    /// # Returns
+    ///
+    /// A new AtomicServer instance
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server cannot bind to the specified address
     pub async fn new(
         addr: &str,
         option: ServerOptions,
@@ -62,11 +97,21 @@ impl AtomicServer {
         Self { client_senders }
     }
 
+    /// Gets a receiver for incoming messages from clients.
+    ///
+    /// # Returns
+    ///
+    /// A channel receiver for message data along with client identifiers
     pub async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
         self.client_senders.get_handle_message_receiver().await
     }
 }
 
+/// Periodically checks for and removes inactive clients.
+///
+/// # Arguments
+///
+/// * `server_sender` - Shared client senders collection
 pub async fn loop_client_checker(server_sender: RwClientSenders) {
     let mut interval = tokio::time::interval_at(
         Instant::now() + Duration::from_secs(15),
@@ -81,6 +126,15 @@ pub async fn loop_client_checker(server_sender: RwClientSenders) {
     }
 }
 
+/// Handles accepting new WebSocket connections.
+///
+/// Listens for incoming TCP connections and spawns a new task for each one.
+///
+/// # Arguments
+///
+/// * `listener` - TCP listener for accepting connections
+/// * `client_senders` - Shared client senders collection
+/// * `option` - Server configuration options
 pub async fn handle_accept(
     listener: TcpListener,
     client_senders: RwClientSenders,
@@ -107,6 +161,14 @@ pub async fn handle_accept(
     }
 }
 
+/// Handles the WebSocket upgrade process for a new connection.
+///
+/// # Arguments
+///
+/// * `client_senders` - Shared client senders collection
+/// * `peer` - Socket address of the connecting client
+/// * `stream` - TCP stream for the connection
+/// * `option` - Server configuration options
 pub async fn accept_connection(
     client_senders: RwClientSenders,
     peer: SocketAddr,
@@ -121,6 +183,20 @@ pub async fn accept_connection(
     }
 }
 
+/// Handles an established WebSocket connection.
+///
+/// Sets up bidirectional message handling for the client connection.
+///
+/// # Arguments
+///
+/// * `client_senders` - Shared client senders collection
+/// * `peer` - Socket address of the client
+/// * `stream` - TCP stream for the connection
+/// * `option` - Server configuration options
+///
+/// # Returns
+///
+/// A Result indicating whether the connection handling completed successfully
 pub async fn handle_connection(
     client_senders: RwClientSenders,
     peer: SocketAddr,
@@ -145,6 +221,7 @@ pub async fn handle_connection(
 
                 match id {
                     Some(id) => {
+                        // Handle incoming messages
                         while let Some(Ok(message)) = istream.next().await {
                             let value = message.into_data();
                             let data = match get_data_schema(&value) {
@@ -154,6 +231,8 @@ pub async fn handle_connection(
                                     continue;
                                 }
                             };
+
+                            // Handle ping messages
                             if data.category == Category::Ping as u16 && use_ping {
                                 if let Ok(data) = Ping::deserialize(&data.datas) {
                                     client_senders
@@ -162,10 +241,14 @@ pub async fn handle_connection(
                                     continue;
                                 }
                             }
+
+                            // Handle disconnect messages
                             if data.category == Category::Disconnect as u16 {
                                 let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
                                 break;
                             }
+
+                            // Forward other messages to application handler
                             client_senders.send_handle_message(data, &id).await;
                         }
                     }
@@ -175,6 +258,7 @@ pub async fn handle_connection(
                 }
             });
 
+            // Handle outgoing messages
             while let Some(message) = rx.recv().await {
                 ostream.send(message.clone()).await?;
                 let data = message.into_data();
@@ -203,6 +287,21 @@ pub async fn handle_connection(
     Ok(())
 }
 
+/// Extracts client ID from the first message and sets up the connection.
+///
+/// WebSocket clients are expected to send a Ping message as their first
+/// communication, containing their client identifier.
+///
+/// # Arguments
+///
+/// * `istream` - Stream of incoming WebSocket messages
+/// * `client_senders` - Shared client senders collection
+/// * `sx` - Sender for outgoing messages to this client
+/// * `options` - Server configuration options
+///
+/// # Returns
+///
+/// Some(client_id) if identification was successful, None otherwise
 async fn get_id_from_first_message(
     istream: &mut SplitStream<WebSocketStream<TcpStream>>,
     client_senders: RwClientSenders,
@@ -220,16 +319,21 @@ async fn get_id_from_first_message(
                 return None;
             }
         };
+
+        // Check if the first message is a ping
         if data.category == Category::Ping as u16 {
             log_debug!("receive ping from client: {:?}", data);
             if let Ok(ping) = Ping::deserialize(&data.datas) {
                 _id = Some(ping.peer.into());
                 client_senders.add(&_id.as_ref().unwrap(), sx).await;
+
+                // Either respond with a pong or proxy the ping
                 if options.use_ping {
                     client_senders
                         .send(&_id.as_ref().unwrap(), make_pong_message())
                         .await;
                 } else {
+                    // Optionally change the category when proxying
                     if options.proxy_ping > 0 {
                         data.category = options.proxy_ping as u16;
                     }

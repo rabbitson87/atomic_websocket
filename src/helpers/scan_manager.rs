@@ -1,3 +1,8 @@
+//! Local network scanning and server discovery functionality.
+//!
+//! This module provides mechanisms to automatically discover WebSocket servers
+//! on the local network by scanning IP addresses in the same subnet.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,23 +18,46 @@ use crate::server_sender::get_ip_address;
 
 use super::traits::StringUtil;
 
+/// Represents the state of a WebSocket connection during scanning.
 pub struct ConnectionState {
+    /// Current status of the connection
     pub status: WebSocketStatus,
+    /// Whether a connection attempt is in progress
     pub is_connecting: bool,
+    /// The actual WebSocket stream if connected
     pub ws_stream: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
 }
 
+/// Manages the scanning process to discover servers on the local network.
+///
+/// Automatically attempts to connect to all IP addresses on the same subnet
+/// to discover available WebSocket servers.
 pub struct ScanManager {
+    /// List of IP addresses to scan
     scan_ips: Vec<String>,
+    /// Tracks connection state for each IP address
     connection_states: Arc<RwLock<HashMap<String, ConnectionState>>>,
 }
 
 impl ScanManager {
+    /// Creates a new ScanManager for a specific port.
+    ///
+    /// Generates a list of IP addresses to scan based on the local network.
+    /// This requires internet connectivity to determine the local IP address.
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - The port number to scan for WebSocket servers
+    ///
+    /// # Returns
+    ///
+    /// A new ScanManager instance
     pub fn new(port: &str) -> Self {
         let mut scan_ips = Vec::new();
         let ip = get_ip_address();
         let ips = ip.split('.').collect::<Vec<&str>>();
 
+        // Generate IP addresses for the entire subnet (1-254)
         for sub_ip in 1..255 {
             let ip = format!("ws://{}.{}.{}.{}:{}", ips[0], ips[1], ips[2], sub_ip, port);
             scan_ips.push(ip);
@@ -41,20 +69,39 @@ impl ScanManager {
         }
     }
 
+    /// Determines if a connection attempt to a specific IP is allowed.
+    ///
+    /// Prevents duplicate connection attempts and stops scanning once
+    /// a server is found.
+    ///
+    /// # Arguments
+    ///
+    /// * `server_ip` - The IP address to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if a connection attempt is allowed, `false` otherwise
     async fn is_connecting_allowed(&self, server_ip: &str) -> bool {
-        // 이미 연결 시도 중인지 확인
+        // Check if already attempting to connect
         if let Some(state) = self.connection_states.read().await.get(server_ip) {
             if state.is_connecting {
                 return false;
             }
         }
-        // 연결된 상태인지 확인
+        // Check if already connected to any server
         if self.connection_states.is_connected().await {
             return false;
         }
         true
     }
 
+    /// Gets a list of IP addresses that can be scanned.
+    ///
+    /// Filters out IP addresses that are already being processed.
+    ///
+    /// # Returns
+    ///
+    /// Vector of scannable IP addresses
     async fn get_scannable_ips(&self) -> Vec<String> {
         let states = self.connection_states.read().await;
 
@@ -72,6 +119,9 @@ impl ScanManager {
             .collect()
     }
 
+    /// Scans the network for WebSocket servers.
+    ///
+    /// Spawns connection attempts for each IP address in parallel.
     async fn scan_network(&mut self) {
         let scan_list: Vec<String> = self.get_scannable_ips().await;
 
@@ -91,6 +141,13 @@ impl ScanManager {
         }
     }
 
+    /// Runs the scanning process until a server is found.
+    ///
+    /// Periodically scans the network until a WebSocket server is discovered.
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing the server IP address and the established WebSocket stream
     pub async fn run(&mut self) -> (String, WebSocketStream<MaybeTlsStream<TcpStream>>) {
         let mut interval =
             tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(2));
@@ -106,6 +163,15 @@ impl ScanManager {
     }
 }
 
+/// Attempts to establish a WebSocket connection to a specific IP address.
+///
+/// # Arguments
+///
+/// * `server_ip` - The WebSocket server address to connect to
+///
+/// # Returns
+///
+/// A tuple containing the connection status and the WebSocket stream if successful
 async fn check_connection(
     server_ip: String,
 ) -> (
@@ -115,7 +181,7 @@ async fn check_connection(
     match timeout(Duration::from_secs(10), connect_async(&server_ip)).await {
         Ok(result) => match result {
             Ok((ws_stream, _)) => {
-                // 연결 성공
+                // Connection successful
                 (WebSocketStatus::Connected, Some(ws_stream))
             }
 
@@ -123,11 +189,11 @@ async fn check_connection(
                 match e {
                     tungstenite::Error::Io(e) => match e.kind() {
                         std::io::ErrorKind::ConnectionRefused => {
-                            // 포트는 닫혔지만 호스트는 존재
+                            // Port is closed but host exists
                             (WebSocketStatus::ConnectionRefused, None)
                         }
                         _ => {
-                            // 그 외 에러 (호스트가 없거나 네트워크 문제)
+                            // Other errors (no host or network issue)
                             (WebSocketStatus::Timeout, None)
                         }
                     },
@@ -136,16 +202,21 @@ async fn check_connection(
             }
         },
         Err(_) => {
-            // 타임아웃
+            // Timeout
             (WebSocketStatus::Timeout, None)
         }
     }
 }
 
+/// Possible states of a WebSocket connection during scanning.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WebSocketStatus {
+    /// Connection attempt in progress
     Connecting,
+    /// Successfully connected
     Connected,
+    /// Connection was refused (host exists but port is closed)
     ConnectionRefused,
+    /// Connection timed out (no host or network issue)
     Timeout,
 }

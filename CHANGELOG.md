@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.27
+
+* Add README.md and doc in files.
+
 ## 0.6.26
 
 * Fixed get_ip_address for local wifi.

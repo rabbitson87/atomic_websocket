@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">
+  <!-- No Background -->
+  
+  <!-- Atom Symbol -->
+  <g transform="translate(200, 130)">
+    <!-- Electron Orbits -->
+    <ellipse cx="0" cy="0" rx="120" ry="45" fill="none" stroke="#CB96FF" stroke-width="3" transform="rotate(0)"/>
+    <ellipse cx="0" cy="0" rx="120" ry="45" fill="none" stroke="#CB96FF" stroke-width="3" transform="rotate(60)"/>
+    <ellipse cx="0" cy="0" rx="120" ry="45" fill="none" stroke="#CB96FF" stroke-width="3" transform="rotate(120)"/>
+    
+    <!-- Electrons -->
+    <circle cx="120" cy="0" r="8" fill="#CB96FF"/>
+    <circle cx="60" cy="-103" r="8" fill="#CB96FF"/>
+    <circle cx="-60" cy="-103" r="8" fill="#CB96FF"/>
+    <circle cx="-120" cy="0" r="8" fill="#CB96FF"/>
+    <circle cx="-60" cy="103" r="8" fill="#CB96FF"/>
+    <circle cx="60" cy="103" r="8" fill="#CB96FF"/>
+    
+    <!-- Nucleus -->
+    <circle cx="0" cy="0" r="25" fill="#CB96FF"/>
+  </g>
+  
+  <!-- No Text -->
+</svg>
