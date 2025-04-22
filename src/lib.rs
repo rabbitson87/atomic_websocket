@@ -166,11 +166,12 @@ pub struct Settings {
 pub struct AtomicWebsocket {}
 
 /// Internal enum to distinguish WebSocket connection types.
-enum AtomicWebsocketType {
+#[derive(Debug, Clone)]
+pub enum AtomicWebsocketType {
     /// Connection to a server on the local network
     Internal,
     /// Connection to an external internet server
-    Outer,
+    External,
 }
 
 impl AtomicWebsocket {
@@ -191,8 +192,9 @@ impl AtomicWebsocket {
     /// let client_options = ClientOptions::default();
     /// let client = AtomicWebsocket::get_internal_client(db.clone(), client_options).await;
     /// ```
-    pub async fn get_internal_client(db: DB, options: ClientOptions) -> AtomicClient {
-        get_client(db, options, AtomicWebsocketType::Internal, None).await
+    pub async fn get_internal_client(db: DB, mut options: ClientOptions) -> AtomicClient {
+        options.atomic_websocket_type = AtomicWebsocketType::Internal;
+        get_client(db, options, None).await
     }
 
     /// Creates a client instance for internal network use with an existing ServerSender.
@@ -208,16 +210,11 @@ impl AtomicWebsocket {
     /// A newly created `AtomicClient` instance
     pub async fn get_internal_client_with_server_sender(
         db: DB,
-        options: ClientOptions,
+        mut options: ClientOptions,
         server_sender: RwServerSender,
     ) -> AtomicClient {
-        get_client(
-            db,
-            options,
-            AtomicWebsocketType::Internal,
-            Some(server_sender),
-        )
-        .await
+        options.atomic_websocket_type = AtomicWebsocketType::Internal;
+        get_client(db, options, Some(server_sender)).await
     }
 
     /// Creates a client instance for external servers.
@@ -230,8 +227,9 @@ impl AtomicWebsocket {
     /// # Returns
     ///
     /// A newly created `AtomicClient` instance
-    pub async fn get_outer_client(db: DB, options: ClientOptions) -> AtomicClient {
-        get_client(db, options, AtomicWebsocketType::Outer, None).await
+    pub async fn get_outer_client(db: DB, mut options: ClientOptions) -> AtomicClient {
+        options.atomic_websocket_type = AtomicWebsocketType::External;
+        get_client(db, options, None).await
     }
 
     /// Creates a client instance for external servers with an existing ServerSender.
@@ -247,10 +245,11 @@ impl AtomicWebsocket {
     /// A newly created `AtomicClient` instance
     pub async fn get_outer_client_with_server_sender(
         db: DB,
-        options: ClientOptions,
+        mut options: ClientOptions,
         server_sender: RwServerSender,
     ) -> AtomicClient {
-        get_client(db, options, AtomicWebsocketType::Outer, Some(server_sender)).await
+        options.atomic_websocket_type = AtomicWebsocketType::External;
+        get_client(db, options, Some(server_sender)).await
     }
 
     /// Creates a server instance for internal network use.
@@ -300,7 +299,7 @@ impl AtomicWebsocket {
 ///
 /// * `db` - Database instance
 /// * `options` - Client options
-/// * `atomic_websocket_type` - Connection type (Internal or Outer)
+/// * `atomic_websocket_type` - Connection type (Internal or External)
 /// * `server_sender` - Optional existing ServerSender instance
 ///
 /// # Returns
@@ -309,7 +308,6 @@ impl AtomicWebsocket {
 async fn get_client(
     db: DB,
     options: ClientOptions,
-    atomic_websocket_type: AtomicWebsocketType,
     server_sender: Option<RwServerSender>,
 ) -> AtomicClient {
     let mut server_sender = match server_sender {
@@ -333,9 +331,9 @@ async fn get_client(
         server_sender,
         options,
     };
-    match atomic_websocket_type {
+    match atomic_websocket.options.atomic_websocket_type {
         AtomicWebsocketType::Internal => atomic_websocket.internal_initialize(db.clone()).await,
-        AtomicWebsocketType::Outer => atomic_websocket.outer_initialize(db.clone()).await,
+        AtomicWebsocketType::External => atomic_websocket.outer_initialize(db.clone()).await,
     }
     atomic_websocket
 }

@@ -17,9 +17,9 @@ use crate::{
     generated::schema::{Data, SaveKey, ServerConnectInfo},
     helpers::{
         common::get_setting_by_key, get_internal_websocket::wrap_get_internal_websocket,
-        traits::StringUtil,
+        get_outer_websocket::wrap_get_outer_websocket, traits::StringUtil,
     },
-    log_debug, log_error, Settings,
+    log_debug, log_error, AtomicWebsocketType, Settings,
 };
 
 use crate::helpers::traits::date_time::now;
@@ -230,12 +230,23 @@ impl ServerSender {
 
                     // Attempt reconnection after max retries
                     if let Some(server_sender) = &self.server_sender {
-                        tokio::spawn(wrap_get_internal_websocket(
-                            self.db.clone(),
-                            server_sender.clone(),
-                            self.server_ip.copy_string(),
-                            self.options.clone(),
-                        ));
+                        match self.options.atomic_websocket_type {
+                            AtomicWebsocketType::Internal => {
+                                tokio::spawn(wrap_get_internal_websocket(
+                                    self.db.clone(),
+                                    server_sender.clone(),
+                                    self.server_ip.copy_string(),
+                                    self.options.clone(),
+                                ));
+                            }
+                            AtomicWebsocketType::External => {
+                                tokio::spawn(wrap_get_outer_websocket(
+                                    self.db.clone(),
+                                    server_sender.clone(),
+                                    self.options.clone(),
+                                ));
+                            }
+                        }
                     }
                     break;
                 }

@@ -18,7 +18,7 @@ use crate::helpers::{
     server_sender::{SenderStatus, ServerSenderTrait},
     traits::date_time::now,
 };
-use crate::{log_debug, log_error, Settings};
+use crate::{log_debug, log_error, AtomicWebsocketType, Settings};
 use bebop::Record;
 
 use tokio::sync::mpsc::Receiver;
@@ -47,6 +47,10 @@ pub struct ClientOptions {
     /// Connection timeout in seconds
     pub connect_timeout_seconds: u64,
 
+    /// AtomicWebsocketType for managing connection types
+    /// (internal or external)
+    pub atomic_websocket_type: AtomicWebsocketType,
+
     /// Whether to use TLS for secure connections (only available with rustls feature)
     #[cfg(feature = "rustls")]
     pub use_tls: bool,
@@ -60,6 +64,7 @@ impl Default for ClientOptions {
             retry_seconds: 30,
             use_keep_ip: false,
             connect_timeout_seconds: 3,
+            atomic_websocket_type: AtomicWebsocketType::Internal,
             #[cfg(feature = "rustls")]
             use_tls: true,
         }

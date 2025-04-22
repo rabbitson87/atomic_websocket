@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.28
+
+* Fixed loop_checker for external connection.
+
 ## 0.6.27
 
 * Add README.md and doc in files.
