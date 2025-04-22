@@ -295,10 +295,12 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
                 server_sender_read.server_received_times,
                 now().timestamp()
             );
-            log_debug!("Try ping from loop checker");
-            let id: String = get_id(server_sender_read.db.clone()).await;
-            drop(server_sender_read);
-            server_sender.send(make_ping_message(&id)).await;
+            if options.use_ping {
+                log_debug!("Try ping from loop checker");
+                let id: String = get_id(server_sender_read.db.clone()).await;
+                drop(server_sender_read);
+                server_sender.send(make_ping_message(&id)).await;
+            }
         }
         log_debug!("loop server checker finish");
     }
@@ -351,10 +353,13 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
                 server_sender_read.server_received_times,
                 now().timestamp()
             );
-            log_debug!("Try ping from loop checker");
-            let id: String = get_id(server_sender_read.db.clone()).await;
-            drop(server_sender_read);
-            server_sender.send(make_ping_message(&id)).await;
+
+            if options.use_ping {
+                log_debug!("Try ping from loop checker");
+                let id: String = get_id(server_sender_read.db.clone()).await;
+                drop(server_sender_read);
+                server_sender.send(make_ping_message(&id)).await;
+            }
         }
         log_debug!("loop server checker finish");
     }

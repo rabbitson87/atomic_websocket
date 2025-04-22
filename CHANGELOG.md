@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.29
+
+* Fixed use_ping for loop_checker.
+
 ## 0.6.28
 
 * Fixed loop_checker for external connection.
