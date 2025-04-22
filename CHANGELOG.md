@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.30
+
+* Fixed use_ping with false when connected first.
+
 ## 0.6.29
 
 * Fixed use_ping for loop_checker.

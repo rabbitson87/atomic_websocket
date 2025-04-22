@@ -149,14 +149,19 @@ pub async fn handle_websocket(
     let id = get_id(db.clone()).await;
     server_sender.add(sx.clone(), &server_ip).await;
 
+    let mut is_first = true;
     let use_ping = options.use_ping;
     if use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
         server_sender.send(make_ping_message(&id)).await;
+    } else {
+        if is_first {
+            is_first = false;
+            server_sender.send_status(SenderStatus::Connected).await;
+        }
     }
 
     let retry_seconds = options.retry_seconds;
-    let mut is_first = true;
     let server_sender_clone = server_sender.clone();
     let server_ip_clone = server_ip.copy_string();
 

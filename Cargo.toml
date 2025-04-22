@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.6.29"
+version = "0.6.30"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
