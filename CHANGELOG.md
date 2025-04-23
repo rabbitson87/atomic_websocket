@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.31
+
+* Fixed proxy_ping with server.
+
 ## 0.6.30
 
 * Fixed use_ping with false when connected first.

@@ -342,6 +342,17 @@ async fn get_id_from_first_message(
                         .await;
                 }
             }
+        } else if options.proxy_ping > 0 && data.category == options.proxy_ping as u16 {
+            if let Ok(ping) = Ping::deserialize(&data.datas) {
+                _id = Some(ping.peer.into());
+                client_senders.add(&_id.as_ref().unwrap(), sx).await;
+
+                // Optionally change the category when proxying
+                data.category = options.proxy_ping as u16;
+                client_senders
+                    .send_handle_message(data, &_id.as_ref().unwrap())
+                    .await;
+            }
         }
     }
     _id
