@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.33
+
+* Add send_all_in_list in clientSenders.
+
 ## 0.6.32
 
 * Combine serverOption in clientSenders.

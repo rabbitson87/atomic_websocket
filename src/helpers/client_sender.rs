@@ -229,6 +229,9 @@ pub trait ClientSendersTrait {
 
     /// Checks if a client is active.
     async fn is_active(&self, peer: &str) -> bool;
+
+    /// Sends a message to clients in the provided list.
+    async fn send_message_in_list(&self, peer_list: Vec<String>, message: Message);
 }
 
 /// Implementation of ClientSendersTrait for thread-safe client senders.
@@ -281,6 +284,15 @@ impl ClientSendersTrait for RwClientSenders {
     /// Checks if a client is active.
     async fn is_active(&self, peer: &str) -> bool {
         self.read().await.is_active(peer)
+    }
+
+    /// Sends a message to clients in the provided list.
+    async fn send_message_in_list(&self, peer_list: Vec<String>, message: Message) {
+        for peer in self.read().await.lists.iter() {
+            if peer_list.contains(&peer.peer) {
+                self.send(&peer.peer, message.clone()).await;
+            }
+        }
     }
 }
 
