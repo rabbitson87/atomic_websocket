@@ -13,6 +13,7 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
+    client_sender::ServerOptions,
     helpers::{common::make_disconnect_message, traits::date_time::now},
     log_debug, log_error,
     schema::Data,
@@ -32,6 +33,8 @@ pub struct ClientSenders {
     handle_message_sx: Sender<(Vec<u8>, String)>,
     /// Channel receiver for obtaining received messages (consumed once)
     handle_message_rx: Option<Receiver<(Vec<u8>, String)>>,
+    /// Server options for connection management
+    pub options: ServerOptions,
 }
 
 impl ClientSenders {
@@ -48,6 +51,7 @@ impl ClientSenders {
             lists: Vec::new(),
             handle_message_sx,
             handle_message_rx: Some(handle_message_rx),
+            options: ServerOptions::default(),
         }
     }
 

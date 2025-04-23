@@ -1,5 +1,9 @@
 # Changes
 
+## 0.6.32
+
+* Combine serverOption in clientSenders.
+
 ## 0.6.31
 
 * Fixed proxy_ping with server.
