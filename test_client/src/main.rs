@@ -38,6 +38,7 @@ async fn main() {
     }
 }
 
+#[allow(dead_code)]
 async fn outer_client_start() {
     let mut client_options = ClientOptions::default();
     client_options.url = "example.com/websocket".into();

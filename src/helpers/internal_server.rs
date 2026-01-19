@@ -14,14 +14,18 @@ use tokio::{
 };
 use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
 
+#[cfg(feature = "bebop")]
+use crate::schema::{Category, Ping};
 use crate::{
     helpers::{
         client_sender::ClientSendersTrait,
-        common::{get_data_schema, make_disconnect_message, make_pong_message},
+        common::{make_disconnect_message, make_pong_message},
     },
     log_debug, log_error,
-    schema::{Category, Ping},
 };
+#[cfg(feature = "bebop")]
+use crate::helpers::common::get_data_schema;
+#[cfg(feature = "bebop")]
 use bebop::Record;
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
 use tokio::sync::mpsc::{self, Sender};
@@ -166,7 +170,7 @@ pub async fn accept_connection(
 ) {
     if let Err(e) = handle_connection(client_senders, peer, stream).await {
         match e {
-            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => (),
             err => log_error!("Error processing connection: {}", err),
         }
     }
@@ -186,6 +190,7 @@ pub async fn accept_connection(
 /// # Returns
 ///
 /// A Result indicating whether the connection handling completed successfully
+#[cfg(feature = "bebop")]
 pub async fn handle_connection(
     client_senders: RwClientSenders,
     peer: SocketAddr,
@@ -219,9 +224,7 @@ pub async fn handle_connection(
                             // Handle ping messages
                             if data.category == Category::Ping as u16 && use_ping {
                                 if let Ok(data) = Ping::deserialize(&data.datas) {
-                                    client_senders
-                                        .send(data.peer.into(), make_pong_message())
-                                        .await;
+                                    client_senders.send(data.peer, make_pong_message()).await;
                                     continue;
                                 }
                             }
@@ -271,6 +274,46 @@ pub async fn handle_connection(
     Ok(())
 }
 
+/// Handles an established WebSocket connection (raw bytes version).
+#[cfg(not(feature = "bebop"))]
+pub async fn handle_connection(
+    client_senders: RwClientSenders,
+    peer: SocketAddr,
+    stream: TcpStream,
+) -> tungstenite::Result<()> {
+    match accept_async(stream).await {
+        Ok(ws_stream) => {
+            log_debug!("New WebSocket connection: {}", peer);
+            let (mut ostream, mut istream) = ws_stream.split();
+
+            let (sx, mut rx) = mpsc::channel(8);
+            let peer_str = peer.to_string();
+            client_senders.add(&peer_str, sx.clone()).await;
+
+            tokio::spawn(async move {
+                // Handle incoming messages - pass raw bytes
+                while let Some(Ok(message)) = istream.next().await {
+                    let value = message.into_data();
+                    client_senders.send_handle_message(value.to_vec(), &peer_str).await;
+                }
+                let _ = sx.send(make_disconnect_message(&peer_str)).await;
+            });
+
+            // Handle outgoing messages
+            while let Some(message) = rx.recv().await {
+                ostream.send(message).await?;
+            }
+            log_debug!("client: {} disconnected", peer);
+            ostream.flush().await?;
+        }
+        Err(e) => {
+            log_debug!("Error accepting WebSocket connection: {:?}", e);
+        }
+    }
+
+    Ok(())
+}
+
 /// Extracts client ID from the first message and sets up the connection.
 ///
 /// WebSocket clients are expected to send a Ping message as their first
@@ -286,6 +329,7 @@ pub async fn handle_connection(
 /// # Returns
 ///
 /// Some(client_id) if identification was successful, None otherwise
+#[cfg(feature = "bebop")]
 async fn get_id_from_first_message(
     istream: &mut SplitStream<WebSocketStream<TcpStream>>,
     client_senders: RwClientSenders,
@@ -308,36 +352,84 @@ async fn get_id_from_first_message(
         if data.category == Category::Ping as u16 {
             log_debug!("receive ping from client: {:?}", data);
             if let Ok(ping) = Ping::deserialize(&data.datas) {
-                _id = Some(ping.peer.into());
-                client_senders.add(&_id.as_ref().unwrap(), sx).await;
+                let peer_id: String = ping.peer.into();
+                _id = Some(peer_id.clone());
+                client_senders.add(&peer_id, sx).await;
 
                 // Either respond with a pong or proxy the ping
                 if options.use_ping {
-                    client_senders
-                        .send(&_id.as_ref().unwrap(), make_pong_message())
-                        .await;
+                    client_senders.send(&peer_id, make_pong_message()).await;
                 } else {
                     // Optionally change the category when proxying
                     if options.proxy_ping > 0 {
                         data.category = options.proxy_ping as u16;
                     }
-                    client_senders
-                        .send_handle_message(data, &_id.as_ref().unwrap())
-                        .await;
+                    client_senders.send_handle_message(data, &peer_id).await;
                 }
             }
         } else if options.proxy_ping > 0 && data.category == options.proxy_ping as u16 {
             if let Ok(ping) = Ping::deserialize(&data.datas) {
-                _id = Some(ping.peer.into());
-                client_senders.add(&_id.as_ref().unwrap(), sx).await;
+                let peer_id: String = ping.peer.into();
+                _id = Some(peer_id.clone());
+                client_senders.add(&peer_id, sx).await;
 
                 // Optionally change the category when proxying
                 data.category = options.proxy_ping as u16;
-                client_senders
-                    .send_handle_message(data, &_id.as_ref().unwrap())
-                    .await;
+                client_senders.send_handle_message(data, &peer_id).await;
             }
         }
     }
     _id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_options_default() {
+        let options = ServerOptions::default();
+        assert!(options.use_ping);
+        assert_eq!(options.proxy_ping, -1);
+    }
+
+    #[test]
+    fn test_server_options_custom() {
+        let options = ServerOptions {
+            use_ping: false,
+            proxy_ping: 100,
+        };
+        assert!(!options.use_ping);
+        assert_eq!(options.proxy_ping, 100);
+    }
+
+    #[test]
+    fn test_server_options_clone() {
+        let options = ServerOptions {
+            use_ping: false,
+            proxy_ping: 50,
+        };
+        let cloned = options.clone();
+        assert!(!cloned.use_ping);
+        assert_eq!(cloned.proxy_ping, 50);
+    }
+
+    #[test]
+    fn test_server_options_proxy_ping_disabled() {
+        let options = ServerOptions {
+            use_ping: true,
+            proxy_ping: -1,
+        };
+        assert!(options.proxy_ping < 0);
+    }
+
+    #[test]
+    fn test_server_options_proxy_ping_enabled() {
+        let options = ServerOptions {
+            use_ping: false,
+            proxy_ping: 200,
+        };
+        assert!(options.proxy_ping > 0);
+        assert_eq!(options.proxy_ping, 200);
+    }
 }

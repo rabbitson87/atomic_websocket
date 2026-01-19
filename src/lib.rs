@@ -12,7 +12,7 @@
 //!
 //! ### Client Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use atomic_websocket::{
 //!     AtomicWebsocket,
 //!     server_sender::{ClientOptions, SenderStatus},
@@ -25,18 +25,18 @@
 //!     let mut client_options = ClientOptions::default();
 //!     client_options.retry_seconds = 2;
 //!     client_options.use_keep_ip = true;
-//!     
+//!
 //!     // Initialize DB (implementation details omitted)
 //!     let db = initialize_database().await?;
 //!     let server_sender = initialize_server_sender().await?;
-//!     
+//!
 //!     // Create client
 //!     let atomic_client = AtomicWebsocket::get_internal_client_with_server_sender(
 //!         db.clone(),
 //!         client_options,
 //!         server_sender.clone(),
 //!     ).await;
-//!     
+//!
 //!     // Connect to server
 //!     let result = atomic_client
 //!         .get_internal_connect(
@@ -47,14 +47,14 @@
 //!             db.clone(),
 //!         )
 //!         .await;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
 //!
 //! ### Server Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use atomic_websocket::{
 //!     AtomicWebsocket,
 //!     client_sender::ServerOptions,
@@ -64,10 +64,10 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Configure server options
 //!     let options = ServerOptions::default();
-//!     
+//!
 //!     // Initialize client senders for managing connections
 //!     let client_senders = initialize_client_senders().await?;
-//!     
+//!
 //!     // Create and start server
 //!     let address = "0.0.0.0:9000";
 //!     let atomic_server = AtomicWebsocket::get_internal_server_with_client_senders(
@@ -75,11 +75,11 @@
 //!         options,
 //!         client_senders.clone(),
 //!     ).await;
-//!     
+//!
 //!     // Set up message handler
 //!     let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
 //!     tokio::spawn(handle_messages(handle_message_receiver));
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -91,16 +91,22 @@ use helpers::{
     internal_server::{AtomicServer, ServerOptions},
     types::DB,
 };
+#[cfg(feature = "native-db")]
 use native_db::{native_db, ToKey};
+#[cfg(feature = "native-db")]
 use native_model::{native_model, Model};
 use serde::{Deserialize, Serialize};
 
 /// Module that re-exports various external dependencies.
 pub mod external {
     pub use async_trait;
+    #[cfg(feature = "bebop")]
+    pub use bebop;
     pub use futures_util;
     pub use nanoid;
+    #[cfg(feature = "native-db")]
     pub use native_db;
+    #[cfg(feature = "native-db")]
     pub use native_model;
     #[cfg(feature = "rustls")]
     pub use rustls;
@@ -111,6 +117,7 @@ pub mod external {
 /// Module containing message schema definitions.
 ///
 /// This module defines the message formats exchanged between clients and servers.
+#[cfg(feature = "bebop")]
 pub mod schema {
     pub use crate::generated::schema::*;
 }
@@ -131,9 +138,9 @@ pub mod server_sender {
 
 /// Module providing common utility functions for WebSocket communication.
 pub mod common {
-    pub use crate::helpers::common::{
-        get_setting_by_key, make_atomic_message, make_response_message, set_setting,
-    };
+    #[cfg(feature = "bebop")]
+    pub use crate::helpers::common::make_response_message;
+    pub use crate::helpers::common::{get_setting_by_key, make_atomic_message, set_setting};
     pub use crate::helpers::get_internal_websocket::get_id;
 }
 
@@ -142,19 +149,35 @@ pub mod types {
     pub use crate::helpers::types::*;
 }
 
+/// Module providing builder patterns for configuration.
+pub mod builder {
+    pub use crate::helpers::builder::{ClientOptionsBuilder, ServerOptionsBuilder};
+}
+
 use server_sender::{ServerSender, ServerSenderTrait};
 use tokio::sync::RwLock;
 use types::{RwClientSenders, RwServerSender};
 
+#[cfg(feature = "bebop")]
 mod generated;
 mod helpers;
 
 /// Database model for storing client settings and state.
+#[cfg(feature = "native-db")]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[native_model(id = 1004, version = 1)]
 #[native_db]
 pub struct Settings {
     #[primary_key]
+    pub key: String,
+    pub value: Vec<u8>,
+}
+
+/// Settings struct for when native-db feature is disabled.
+/// Stores key-value pairs in memory only.
+#[cfg(not(feature = "native-db"))]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Settings {
     pub key: String,
     pub value: Vec<u8>,
 }
@@ -188,7 +211,7 @@ impl AtomicWebsocket {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```rust,ignore
     /// let client_options = ClientOptions::default();
     /// let client = AtomicWebsocket::get_internal_client(db.clone(), client_options).await;
     /// ```
@@ -265,7 +288,7 @@ impl AtomicWebsocket {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```rust,ignore
     /// let server_options = ServerOptions::default();
     /// let server = AtomicWebsocket::get_internal_server("127.0.0.1:9000".to_string(), server_options).await;
     /// ```

@@ -1,9 +1,12 @@
+pub mod builder;
 pub mod client_sender;
 pub mod common;
+pub mod error;
 pub mod get_internal_websocket;
 pub mod get_outer_websocket;
 pub mod internal_client;
 pub mod internal_server;
+pub mod retry;
 pub mod scan_manager;
 pub mod server_sender;
 pub mod traits;

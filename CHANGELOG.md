@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.0
+
+* Refactor code base, remove db dependency.
+
 ## 0.6.33
 
 * Add send_all_in_list in clientSenders.

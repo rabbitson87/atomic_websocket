@@ -6,7 +6,7 @@
 use super::types::{RwServerSender, DB};
 use crate::{helpers::get_internal_websocket::handle_websocket, log_error};
 
-use crate::{helpers::traits::StringUtil, server_sender::ClientOptions};
+use crate::server_sender::ClientOptions;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -83,7 +83,7 @@ pub async fn get_outer_websocket(
                 db,
                 server_sender.clone(),
                 options,
-                server_ip.copy_string(),
+                server_ip.clone(),
                 ws_stream,
             )
             .await?;
@@ -120,23 +120,20 @@ pub async fn get_outer_websocket(
     // Format the URL with 'ws://' scheme for standard WebSockets
     let server_ip = format!("ws://{}", &options.url);
     log_debug!("Connecting to WebSocket server: {:?}", &server_ip);
-    match timeout(
+    if let Ok(Ok((ws_stream, _))) = timeout(
         Duration::from_secs(options.connect_timeout_seconds),
         connect_async(&server_ip),
     )
     .await
     {
-        Ok(Ok((ws_stream, _))) => {
-            handle_websocket(
-                db,
-                server_sender.clone(),
-                options,
-                server_ip.copy_string(),
-                ws_stream,
-            )
-            .await?
-        }
-        _ => {}
+        handle_websocket(
+            db,
+            server_sender.clone(),
+            options,
+            server_ip.clone(),
+            ws_stream,
+        )
+        .await?
     }
     log_debug!("Failed to server connect to {}", server_ip);
 

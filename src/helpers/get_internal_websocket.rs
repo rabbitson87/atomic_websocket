@@ -15,19 +15,22 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+#[cfg(feature = "bebop")]
+use crate::generated::schema::Category;
+#[cfg(feature = "bebop")]
+use crate::helpers::common::get_data_schema;
 use crate::{
-    generated::schema::{Category, SaveKey},
     helpers::{
-        common::{get_data_schema, make_disconnect_message, make_ping_message},
+        common::{make_disconnect_message, make_ping_message},
         server_sender::{SenderStatus, ServerSenderTrait},
-        traits::{atomic::FlagAtomic, StringUtil},
+        traits::atomic::FlagAtomic,
     },
     log_debug, log_error, Settings,
 };
 
 use super::{
     internal_client::ClientOptions,
-    types::{RwServerSender, DB},
+    types::{save_key, RwServerSender, DB},
 };
 
 /// Wrapper function for establishing an internal WebSocket connection.
@@ -92,7 +95,7 @@ pub async fn get_internal_websocket(
                 db,
                 server_sender.clone(),
                 options,
-                server_ip.copy_string(),
+                server_ip.clone(),
                 ws_stream,
             )
             .await
@@ -130,6 +133,7 @@ pub async fn get_internal_websocket(
 /// # Returns
 ///
 /// A Result indicating whether the connection handling completed successfully
+#[cfg(feature = "bebop")]
 pub async fn handle_websocket(
     db: DB,
     server_sender: RwServerSender,
@@ -154,16 +158,14 @@ pub async fn handle_websocket(
     if use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
         server_sender.send(make_ping_message(&id)).await;
-    } else {
-        if is_first {
-            is_first = false;
-            server_sender.send_status(SenderStatus::Connected).await;
-        }
+    } else if is_first {
+        is_first = false;
+        server_sender.send_status(SenderStatus::Connected).await;
     }
 
     let retry_seconds = options.retry_seconds;
     let server_sender_clone = server_sender.clone();
-    let server_ip_clone = server_ip.copy_string();
+    let server_ip_clone = server_ip.clone();
 
     // Spawn a task to handle incoming messages
     tokio::spawn(async move {
@@ -186,7 +188,7 @@ pub async fn handle_websocket(
                 is_first = false;
                 server_sender.send_status(SenderStatus::Connected).await;
             }
-            let id = id.copy_string();
+            let id = id.clone();
             log_debug!("Client receive message: {:?}", data);
             if data.category == Category::Pong as u16 {
                 if !is_wait_ping.is_true() {
@@ -202,17 +204,13 @@ pub async fn handle_websocket(
                 }
                 continue;
             } else if data.category == Category::Disconnect as u16 {
-                let _ = sx
-                    .send(make_disconnect_message(
-                        server_ip
-                            .split("://")
-                            .nth(1)
-                            .unwrap()
-                            .split(":")
-                            .nth(0)
-                            .unwrap(),
-                    ))
-                    .await;
+                // Parse server IP from URL format (e.g., "ws://192.168.1.1:8080")
+                let peer = server_ip
+                    .split("://")
+                    .nth(1)
+                    .and_then(|s| s.split(':').next())
+                    .unwrap_or(&server_ip);
+                let _ = sx.send(make_disconnect_message(peer)).await;
                 break;
             }
             server_sender.send_handle_message(data).await;
@@ -250,6 +248,60 @@ pub async fn handle_websocket(
     Ok(())
 }
 
+/// Handles an established WebSocket connection (raw bytes version).
+#[cfg(not(feature = "bebop"))]
+pub async fn handle_websocket(
+    db: DB,
+    server_sender: RwServerSender,
+    options: ClientOptions,
+    server_ip: String,
+    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+) -> tokio_tungstenite::tungstenite::Result<()> {
+    if !server_sender.is_need_connect(&server_ip).await {
+        return Ok(());
+    }
+
+    server_sender.write().await.is_try_connect = true;
+    let (mut ostream, mut istream) = ws_stream.split();
+    log_debug!("Connected to {} for web socket", server_ip);
+
+    let (sx, mut rx) = mpsc::channel(8);
+    let id = get_id(db.clone()).await;
+    server_sender.add(sx.clone(), &server_ip).await;
+
+    let use_ping = options.use_ping;
+    if use_ping {
+        server_sender.send(make_ping_message(&id)).await;
+    } else {
+        server_sender.send_status(SenderStatus::Connected).await;
+    }
+
+    let server_sender_clone = server_sender.clone();
+
+    // Spawn a task to handle incoming messages - pass raw bytes
+    tokio::spawn(async move {
+        let server_sender = server_sender_clone;
+
+        while let Some(Ok(message)) = istream.next().await {
+            server_sender.write_received_times().await;
+            let value = message.into_data();
+            server_sender.send_handle_message(value.to_vec()).await;
+        }
+    });
+
+    // Handle outgoing messages
+    while let Some(message) = rx.recv().await {
+        if let Err(e) = ostream.send(message).await {
+            log_error!("Error sending message: {:?}", e);
+            break;
+        }
+    }
+    log_debug!("WebSocket closed");
+    ostream.flush().await?;
+    server_sender.write().await.is_try_connect = false;
+    Ok(())
+}
+
 /// Retrieves the client identifier from the database.
 ///
 /// # Arguments
@@ -258,18 +310,26 @@ pub async fn handle_websocket(
 ///
 /// # Returns
 ///
-/// The client identifier as a string
+/// The client identifier as a string, or empty string if not found
+#[cfg(feature = "native-db")]
 pub async fn get_id(db: DB) -> String {
     let db = db.lock().await;
-    let reader = db.r_transaction().unwrap();
+    let Ok(reader) = db.r_transaction() else {
+        return String::new();
+    };
 
-    let mut return_string = String::new();
-    if let Some(data) = reader
-        .get()
-        .primary::<Settings>(format!("{:?}", SaveKey::ClientId))
-        .unwrap()
-    {
-        return_string = String::from_utf8(data.value).unwrap().into()
-    }
-    return_string
+    let Ok(Some(data)) = reader.get().primary::<Settings>(save_key::CLIENT_ID) else {
+        return String::new();
+    };
+
+    String::from_utf8(data.value).unwrap_or_default()
+}
+
+/// Retrieves the client identifier from in-memory storage.
+#[cfg(not(feature = "native-db"))]
+pub async fn get_id(db: DB) -> String {
+    let db = db.lock().await;
+    db.get(save_key::CLIENT_ID)
+        .map(|v| String::from_utf8(v.clone()).unwrap_or_default())
+        .unwrap_or_default()
 }
