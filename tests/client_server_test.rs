@@ -13,8 +13,8 @@ use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 use common::{
-    create_test_rw_client_senders, default_timeout, find_available_port, medium_delay,
-    short_delay, with_timeout,
+    create_test_rw_client_senders, default_timeout, find_available_port, medium_delay, short_delay,
+    with_timeout,
 };
 
 // ============================================================================
@@ -67,6 +67,7 @@ async fn test_multiple_clients_connect() {
     let options = ServerOptions {
         use_ping: false,
         proxy_ping: -1,
+        ..Default::default()
     };
 
     let _server = AtomicWebsocket::get_internal_server_with_client_senders(

@@ -88,9 +88,13 @@ pub async fn get_outer_websocket(
             )
             .await?;
         }
-        _ => {}
+        Ok(Err(e)) => {
+            log_debug!("Failed to connect to {}: {:?}", server_ip, e);
+        }
+        Err(_) => {
+            log_debug!("Connection timeout to {}", server_ip);
+        }
     }
-    log_debug!("Failed to server connect to {}", server_ip);
 
     Ok(())
 }

@@ -3,15 +3,10 @@
 //! This module provides functionality for managing connections to WebSocket servers,
 //! including message sending, connection status tracking, and automatic reconnection.
 
-use std::time::Duration;
-
 use async_trait::async_trait;
 #[cfg(feature = "bebop")]
 use bebop::Record;
-use tokio::{
-    sync::mpsc::{self, Receiver, Sender},
-    time::sleep,
-};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 
 #[cfg(feature = "bebop")]
@@ -29,6 +24,7 @@ use crate::helpers::traits::date_time::now;
 use super::{
     common::make_disconnect_message,
     internal_client::ClientOptions,
+    retry::ExponentialBackoff,
     types::{save_key, RwServerSender, DB},
 };
 
@@ -220,7 +216,7 @@ impl ServerSender {
     /// A new ServerSender instance
     pub fn new(db: DB, server_ip: String, options: ClientOptions) -> Self {
         let (status_tx, status_rx) = mpsc::channel(8);
-        let (handle_message_tx, handle_message_rx) = mpsc::channel(8);
+        let (handle_message_tx, handle_message_rx) = mpsc::channel(256);
 
         Self {
             sx: None,
@@ -313,7 +309,9 @@ impl ServerSender {
     ///
     /// * `status` - The connection status to send
     pub fn send_status(&self, status: SenderStatus) {
-        let _ = self.status_tx.try_send(status);
+        if self.status_tx.try_send(status).is_err() {
+            log_debug!("Status channel full, dropping status update");
+        }
     }
 
     /// Forwards received message data to the application.
@@ -322,85 +320,8 @@ impl ServerSender {
     ///
     /// * `data` - Binary message data
     pub fn send_handle_message(&self, data: Vec<u8>) {
-        let _ = self.handle_message_tx.try_send(data);
-    }
-
-    /// Sends a message to the connected server.
-    ///
-    /// Implements exponential backoff retry logic with configurable limits.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - WebSocket message to send
-    pub async fn send(&mut self, message: Message) {
-        if let Some(sx) = &self.sx {
-            let sender = sx.clone();
-            let mut backoff = Duration::from_millis(50); // Start with 50ms
-            let max_backoff = Duration::from_secs(1); // Maximum 1 second
-            let mut count = 0;
-
-            // Determine retry count limit based on configured retry seconds
-            let limit_count = match self.options.retry_seconds > 5 {
-                true => 5,
-                false => match self.options.retry_seconds {
-                    0 | 1 => 1,
-                    _ => self.options.retry_seconds - 1,
-                },
-            };
-
-            // Initial send attempt
-            match sender.send(message.clone()).await {
-                Ok(_) => return,
-                Err(e) => {
-                    log_error!("Initial send error: {:?}", e);
-                }
-            }
-
-            // Retry loop with exponential backoff
-            loop {
-                if count >= limit_count {
-                    self.send_status(SenderStatus::Disconnected);
-
-                    // Attempt reconnection after max retries
-                    if let Some(server_sender) = &self.server_sender {
-                        match self.options.atomic_websocket_type {
-                            AtomicWebsocketType::Internal => {
-                                tokio::spawn(wrap_get_internal_websocket(
-                                    self.db.clone(),
-                                    server_sender.clone(),
-                                    self.server_ip.clone(),
-                                    self.options.clone(),
-                                ));
-                            }
-                            AtomicWebsocketType::External => {
-                                tokio::spawn(wrap_get_outer_websocket(
-                                    self.db.clone(),
-                                    server_sender.clone(),
-                                    self.options.clone(),
-                                ));
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                backoff = std::cmp::min(backoff * 2, max_backoff);
-                sleep(backoff).await;
-
-                count += 1;
-                log_debug!("Retrying send (attempt {})", count + 1);
-
-                match sx.clone().send(message.clone()).await {
-                    Ok(_) => {
-                        log_debug!("Send succeeded on retry {}", count);
-                        return;
-                    }
-                    Err(e) => {
-                        log_error!("Retry {} failed: {:?}", count, e);
-                        continue;
-                    }
-                }
-            }
+        if self.handle_message_tx.try_send(data).is_err() {
+            log_error!("Handle message channel full, dropping message");
         }
     }
 }
@@ -450,7 +371,7 @@ pub trait ServerSenderTrait {
     async fn write_received_times(&self);
 
     /// Checks if a connection to the specified server IP is needed.
-    async fn is_need_connect(&self, server_ip: &str) -> bool;
+    async fn is_need_connect(&self) -> bool;
 }
 
 /// Implementation of ServerSenderTrait for thread-safe server sender.
@@ -507,18 +428,75 @@ impl ServerSenderTrait for RwServerSender {
             log_error!("Failed to serialize Data: {:?}", e);
             return;
         }
-        self.write().await.send_handle_message(buf);
+        self.read().await.send_handle_message(buf);
     }
 
     /// Forwards received message data to the application (raw bytes version).
     #[cfg(not(feature = "bebop"))]
     async fn send_handle_message(&self, data: Vec<u8>) {
-        self.write().await.send_handle_message(data);
+        self.read().await.send_handle_message(data);
     }
 
     /// Sends a message to the connected server.
+    ///
+    /// Extracts needed data under a brief read lock, then retries with
+    /// exponential backoff outside the lock to avoid blocking other operations.
     async fn send(&self, message: Message) {
-        self.write().await.send(message).await;
+        // Phase 1: Brief read lock to clone needed data
+        let (sender, status_tx, options, server_sender_ref, db, server_ip) = {
+            let guard = self.read().await;
+            let Some(sx) = guard.sx.as_ref() else {
+                return;
+            };
+            (
+                sx.clone(),
+                guard.status_tx.clone(),
+                guard.options.clone(),
+                guard.server_sender.clone(),
+                guard.db.clone(),
+                guard.server_ip.clone(),
+            )
+        }; // Read lock released
+
+        // Phase 2: Compute retry limit
+        let limit_count = match options.retry_seconds > 5 {
+            true => 5,
+            false => match options.retry_seconds {
+                0 | 1 => 1,
+                _ => (options.retry_seconds - 1) as u32,
+            },
+        };
+
+        // Phase 3: Retry loop — NO LOCK HELD
+        let mut backoff = ExponentialBackoff::new(50, 1, limit_count);
+        loop {
+            match sender.send(message.clone()).await {
+                Ok(_) => return,
+                Err(e) => {
+                    log_error!("Send error (attempt {}): {:?}", backoff.count() + 1, e);
+                    if !backoff.wait().await {
+                        // Retries exhausted: notify disconnection + spawn reconnection
+                        let _ = status_tx.try_send(SenderStatus::Disconnected);
+                        if let Some(ref ss) = server_sender_ref {
+                            match options.atomic_websocket_type {
+                                AtomicWebsocketType::Internal => {
+                                    tokio::spawn(wrap_get_internal_websocket(
+                                        db,
+                                        ss.clone(),
+                                        server_ip,
+                                        options,
+                                    ));
+                                }
+                                AtomicWebsocketType::External => {
+                                    tokio::spawn(wrap_get_outer_websocket(db, ss.clone(), options));
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Registers a reference to self for recursive operations.
@@ -678,10 +656,14 @@ impl ServerSenderTrait for RwServerSender {
         self.write().await.server_received_times = now().timestamp();
     }
 
-    /// Checks if a connection to the specified server IP is needed.
-    async fn is_need_connect(&self, server_ip: &str) -> bool {
-        let clone = self.read().await;
-        server_ip != clone.server_ip && !clone.is_try_connect
+    /// Checks if a new connection attempt is needed.
+    ///
+    /// Returns true when no connection task is currently running (`is_try_connect == false`).
+    /// The `is_try_connect` flag is set to true when `handle_websocket` begins and
+    /// reset to false when it exits, providing reliable duplicate-connection prevention
+    /// regardless of whether the server IP has changed.
+    async fn is_need_connect(&self) -> bool {
+        !self.read().await.is_try_connect
     }
 }
 
@@ -818,7 +800,8 @@ mod tests {
     #[tokio::test]
     async fn test_server_sender_remove_ip_clears_state() {
         let db = create_test_db();
-        let mut sender = ServerSender::new(db, "192.168.1.100:9000".to_string(), create_test_options());
+        let mut sender =
+            ServerSender::new(db, "192.168.1.100:9000".to_string(), create_test_options());
 
         let (tx, _rx) = mpsc::channel(8);
         sender.add(tx, "192.168.1.100:9000");
@@ -963,7 +946,7 @@ mod tests {
 
     #[cfg(not(feature = "native-db"))]
     #[tokio::test]
-    async fn test_trait_is_need_connect_different_ip() {
+    async fn test_trait_is_need_connect_not_trying() {
         let sender = create_rw_server_sender();
 
         {
@@ -972,23 +955,9 @@ mod tests {
             guard.is_try_connect = false;
         }
 
-        // 다른 IP로 연결 필요
-        assert!(sender.is_need_connect("192.168.1.200:9000").await);
-    }
-
-    #[cfg(not(feature = "native-db"))]
-    #[tokio::test]
-    async fn test_trait_is_need_connect_same_ip() {
-        let sender = create_rw_server_sender();
-
-        {
-            let mut guard = sender.write().await;
-            guard.server_ip = "192.168.1.100:9000".to_string();
-            guard.is_try_connect = false;
-        }
-
-        // 같은 IP는 연결 불필요
-        assert!(!sender.is_need_connect("192.168.1.100:9000").await);
+        // is_try_connect가 false면 연결 필요 (IP가 달라도 같아도)
+        assert!(sender.is_need_connect().await);
+        assert!(sender.is_need_connect().await);
     }
 
     #[cfg(not(feature = "native-db"))]
@@ -1002,8 +971,9 @@ mod tests {
             guard.is_try_connect = true; // 이미 연결 시도 중
         }
 
-        // 이미 연결 시도 중이면 연결 불필요
-        assert!(!sender.is_need_connect("192.168.1.200:9000").await);
+        // is_try_connect가 true면 연결 불필요 (IP가 달라도 같아도)
+        assert!(!sender.is_need_connect().await);
+        assert!(!sender.is_need_connect().await);
     }
 
     #[cfg(not(feature = "native-db"))]

@@ -149,6 +149,15 @@ impl ServerOptionsBuilder {
         self
     }
 
+    /// Sets the client inactivity timeout in seconds (default: 30).
+    ///
+    /// Clients that haven't sent a message within this duration
+    /// are considered inactive and removed.
+    pub fn client_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.options.client_timeout_seconds = seconds;
+        self
+    }
+
     /// Builds and returns the configured [`ServerOptions`].
     pub fn build(self) -> ServerOptions {
         self.options

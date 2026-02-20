@@ -10,10 +10,12 @@ use tokio::{
     self,
     net::{TcpListener, TcpStream},
     sync::{mpsc::Receiver, RwLock},
-    time::{Instant, MissedTickBehavior},
+    time::{timeout, Instant, MissedTickBehavior},
 };
 use tokio_tungstenite::{tungstenite::Error, WebSocketStream};
 
+#[cfg(feature = "bebop")]
+use crate::helpers::common::get_data_schema;
 #[cfg(feature = "bebop")]
 use crate::schema::{Category, Ping};
 use crate::{
@@ -23,8 +25,6 @@ use crate::{
     },
     log_debug, log_error,
 };
-#[cfg(feature = "bebop")]
-use crate::helpers::common::get_data_schema;
 #[cfg(feature = "bebop")]
 use bebop::Record;
 use futures_util::{stream::SplitStream, SinkExt, StreamExt};
@@ -55,6 +55,9 @@ pub struct ServerOptions {
     /// Category ID to use when proxying ping messages instead of responding directly
     /// A value of -1 disables ping proxying
     pub proxy_ping: i16,
+
+    /// Seconds of client inactivity before the server considers the client disconnected
+    pub client_timeout_seconds: u64,
 }
 
 impl Default for ServerOptions {
@@ -62,6 +65,7 @@ impl Default for ServerOptions {
         Self {
             use_ping: true,
             proxy_ping: -1,
+            client_timeout_seconds: 30,
         }
     }
 }
@@ -231,7 +235,6 @@ pub async fn handle_connection(
 
                             // Handle disconnect messages
                             if data.category == Category::Disconnect as u16 {
-                                let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
                                 break;
                             }
 
@@ -239,10 +242,10 @@ pub async fn handle_connection(
                             client_senders.send_handle_message(data, &id).await;
                         }
                     }
-                    None => {
-                        let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
-                    }
+                    None => {}
                 }
+                // Always send disconnect when reader exits (stream closed or explicit disconnect)
+                let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
             });
 
             // Handle outgoing messages
@@ -264,7 +267,7 @@ pub async fn handle_connection(
                 }
             }
             log_debug!("client: {} disconnected", peer);
-            ostream.flush().await?;
+            let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
         }
         Err(e) => {
             log_debug!("Error accepting WebSocket connection: {:?}", e);
@@ -294,7 +297,9 @@ pub async fn handle_connection(
                 // Handle incoming messages - pass raw bytes
                 while let Some(Ok(message)) = istream.next().await {
                     let value = message.into_data();
-                    client_senders.send_handle_message(value.to_vec(), &peer_str).await;
+                    client_senders
+                        .send_handle_message(value.to_vec(), &peer_str)
+                        .await;
                 }
                 let _ = sx.send(make_disconnect_message(&peer_str)).await;
             });
@@ -304,7 +309,7 @@ pub async fn handle_connection(
                 ostream.send(message).await?;
             }
             log_debug!("client: {} disconnected", peer);
-            ostream.flush().await?;
+            let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
         }
         Err(e) => {
             log_debug!("Error accepting WebSocket connection: {:?}", e);
@@ -398,6 +403,7 @@ mod tests {
         let options = ServerOptions {
             use_ping: false,
             proxy_ping: 100,
+            ..Default::default()
         };
         assert!(!options.use_ping);
         assert_eq!(options.proxy_ping, 100);
@@ -408,6 +414,7 @@ mod tests {
         let options = ServerOptions {
             use_ping: false,
             proxy_ping: 50,
+            ..Default::default()
         };
         let cloned = options.clone();
         assert!(!cloned.use_ping);
@@ -419,6 +426,7 @@ mod tests {
         let options = ServerOptions {
             use_ping: true,
             proxy_ping: -1,
+            ..Default::default()
         };
         assert!(options.proxy_ping < 0);
     }
@@ -428,6 +436,7 @@ mod tests {
         let options = ServerOptions {
             use_ping: false,
             proxy_ping: 200,
+            ..Default::default()
         };
         assert!(options.proxy_ping > 0);
         assert_eq!(options.proxy_ping, 200);

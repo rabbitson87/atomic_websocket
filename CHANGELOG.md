@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.1v
+
+* Improve connection stabiliation.
+
 ## 0.7.0
 
 * Refactor code base, remove db dependency.

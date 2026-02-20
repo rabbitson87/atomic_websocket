@@ -113,7 +113,7 @@ pub async fn get_internal_websocket(
             log_error!("Error connecting to {}: {:?}", server_ip, e);
         }
     }
-    log_debug!("Failed to server connect to {}", server_ip);
+    log_debug!("Connection session ended for {}", server_ip);
     Ok(())
 }
 
@@ -141,11 +141,13 @@ pub async fn handle_websocket(
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    if !server_sender.is_need_connect(&server_ip).await {
-        return Ok(());
+    {
+        let mut guard = server_sender.write().await;
+        if guard.is_try_connect {
+            return Ok(());
+        }
+        guard.is_try_connect = true;
     }
-
-    server_sender.write().await.is_try_connect = true;
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
@@ -158,14 +160,16 @@ pub async fn handle_websocket(
     if use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
         server_sender.send(make_ping_message(&id)).await;
-    } else if is_first {
+    } else {
         is_first = false;
+        server_sender.write_received_times().await;
         server_sender.send_status(SenderStatus::Connected).await;
     }
 
     let retry_seconds = options.retry_seconds;
     let server_sender_clone = server_sender.clone();
     let server_ip_clone = server_ip.clone();
+    let (stream_end_tx, mut stream_end_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn a task to handle incoming messages
     tokio::spawn(async move {
@@ -198,8 +202,8 @@ pub async fn handle_websocket(
                     // Schedule the next ping after receiving a pong
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(retry_seconds)).await;
-                        server_sender_clone.send(make_ping_message(&id)).await;
                         is_wait_ping_clone.set_bool(false);
+                        server_sender_clone.send(make_ping_message(&id)).await;
                     });
                 }
                 continue;
@@ -215,35 +219,50 @@ pub async fn handle_websocket(
             }
             server_sender.send_handle_message(data).await;
         }
+        // Notify writer that the read stream has ended (server disconnected)
+        let _ = stream_end_tx.send(());
     });
 
-    // Handle outgoing messages
-    while let Some(message) = rx.recv().await {
-        match ostream.send(message.clone()).await {
-            Ok(_) => {
-                let data = message.into_data();
-                let data = match get_data_schema(&data) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        log_error!("Error getting data schema: {:?}", e);
-                        rx.close();
-                        break;
+    // Handle outgoing messages, also watching for reader stream end
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Some(message) => {
+                        match ostream.send(message.clone()).await {
+                            Ok(_) => {
+                                let data = message.into_data();
+                                let data = match get_data_schema(&data) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        log_error!("Error getting data schema: {:?}", e);
+                                        rx.close();
+                                        break;
+                                    }
+                                };
+                                log_debug!("Send message: {:?}", data);
+                                if data.category == Category::Disconnect as u16 {
+                                    rx.close();
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                log_error!("Error sending message: {:?}", e);
+                                break;
+                            }
+                        }
                     }
-                };
-                log_debug!("Send message: {:?}", data);
-                if data.category == Category::Disconnect as u16 {
-                    rx.close();
-                    break;
+                    None => break,
                 }
             }
-            Err(e) => {
-                log_error!("Error sending message: {:?}", e);
+            _ = &mut stream_end_rx => {
+                // Reader stream ended — connection is dead
                 break;
             }
         }
     }
     log_debug!("WebSocket closed");
-    ostream.flush().await?;
+    let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
     server_sender.write().await.is_try_connect = false;
     Ok(())
 }
@@ -257,26 +276,26 @@ pub async fn handle_websocket(
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    if !server_sender.is_need_connect(&server_ip).await {
-        return Ok(());
+    {
+        let mut guard = server_sender.write().await;
+        if guard.is_try_connect {
+            return Ok(());
+        }
+        guard.is_try_connect = true;
     }
-
-    server_sender.write().await.is_try_connect = true;
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
     let (sx, mut rx) = mpsc::channel(8);
-    let id = get_id(db.clone()).await;
     server_sender.add(sx.clone(), &server_ip).await;
 
-    let use_ping = options.use_ping;
-    if use_ping {
-        server_sender.send(make_ping_message(&id)).await;
-    } else {
-        server_sender.send_status(SenderStatus::Connected).await;
-    }
+    // Without bebop there is no pong handshake, so emit Connected immediately
+    // and set the initial received timestamp for the loop checker.
+    server_sender.write_received_times().await;
+    server_sender.send_status(SenderStatus::Connected).await;
 
     let server_sender_clone = server_sender.clone();
+    let (stream_end_tx, mut stream_end_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn a task to handle incoming messages - pass raw bytes
     tokio::spawn(async move {
@@ -287,17 +306,32 @@ pub async fn handle_websocket(
             let value = message.into_data();
             server_sender.send_handle_message(value.to_vec()).await;
         }
+        // Notify writer that the read stream has ended (server disconnected)
+        let _ = stream_end_tx.send(());
     });
 
-    // Handle outgoing messages
-    while let Some(message) = rx.recv().await {
-        if let Err(e) = ostream.send(message).await {
-            log_error!("Error sending message: {:?}", e);
-            break;
+    // Handle outgoing messages, also watching for reader stream end
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Some(message) => {
+                        if let Err(e) = ostream.send(message).await {
+                            log_error!("Error sending message: {:?}", e);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = &mut stream_end_rx => {
+                // Reader stream ended — connection is dead
+                break;
+            }
         }
     }
     log_debug!("WebSocket closed");
-    ostream.flush().await?;
+    let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
     server_sender.write().await.is_try_connect = false;
     Ok(())
 }

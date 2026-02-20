@@ -232,7 +232,10 @@ impl AtomicClient {
         let mut db = db.lock().await;
         if db.get(save_key::CLIENT_ID).is_none() {
             use nanoid::nanoid;
-            db.insert(save_key::CLIENT_ID.to_owned(), nanoid!().as_bytes().to_vec());
+            db.insert(
+                save_key::CLIENT_ID.to_owned(),
+                nanoid!().as_bytes().to_vec(),
+            );
         }
     }
 
@@ -266,7 +269,7 @@ impl AtomicClient {
 /// * `options` - Client connection options
 #[cfg(all(feature = "native-db", feature = "bebop"))]
 async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
-    let retry_seconds = options.retry_seconds;
+    let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
         Instant::now() + Duration::from_secs(retry_seconds),
@@ -338,8 +341,9 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
             });
         }
         // Send a ping if no messages for 2x retry period
-        else if server_sender_read.server_received_times + (retry_seconds as i64 * 2)
-            < now().timestamp()
+        else if server_sender_read.server_received_times > 0
+            && server_sender_read.server_received_times + (retry_seconds as i64 * 2)
+                < now().timestamp()
         {
             log_debug!(
                 "send: {:?}, current: {:?}",
@@ -348,8 +352,9 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
             );
             if options.use_ping {
                 log_debug!("Try ping from loop checker");
-                let id: String = get_id(server_sender_read.db.clone()).await;
+                let db = server_sender_read.db.clone();
                 drop(server_sender_read);
+                let id: String = get_id(db).await;
                 server_sender.send(make_ping_message(&id)).await;
             }
         }
@@ -360,7 +365,7 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
 /// Periodic health check for internal network connections (simplified version).
 #[cfg(not(all(feature = "native-db", feature = "bebop")))]
 async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
-    let retry_seconds = options.retry_seconds;
+    let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
         Instant::now() + Duration::from_secs(retry_seconds),
@@ -394,13 +399,15 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
             });
         }
         // Send a ping if no messages for 2x retry period
-        else if server_sender_read.server_received_times + (retry_seconds as i64 * 2)
-            < now().timestamp()
+        else if server_sender_read.server_received_times > 0
+            && server_sender_read.server_received_times + (retry_seconds as i64 * 2)
+                < now().timestamp()
         {
             if options.use_ping {
                 log_debug!("Try ping from loop checker");
-                let id: String = get_id(server_sender_read.db.clone()).await;
+                let db = server_sender_read.db.clone();
                 drop(server_sender_read);
+                let id: String = get_id(db).await;
                 server_sender.send(make_ping_message(&id)).await;
             }
         }
@@ -418,7 +425,7 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options
 async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
-    let retry_seconds = options.retry_seconds;
+    let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
         Instant::now() + Duration::from_secs(retry_seconds),
@@ -430,8 +437,11 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
         interval.tick().await;
         let server_sender_read = server_sender.read().await;
 
-        // Check if connection is dead (no messages for 90 seconds)
-        if server_sender_read.server_received_times + 90 < now().timestamp() {
+        // Check if connection is dead (no messages for 4x retry period)
+        if server_sender_read.server_received_times > 0
+            && server_sender_read.server_received_times + (retry_seconds as i64 * 4)
+                < now().timestamp()
+        {
             drop(server_sender_read);
             server_sender.send_status(SenderStatus::Disconnected).await;
 
@@ -448,8 +458,11 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
                 true
             });
         }
-        // Send a ping if no messages for 30 seconds
-        else if server_sender_read.server_received_times + 30 < now().timestamp() {
+        // Send a ping if no messages for 2x retry period
+        else if server_sender_read.server_received_times > 0
+            && server_sender_read.server_received_times + (retry_seconds as i64 * 2)
+                < now().timestamp()
+        {
             log_debug!(
                 "send: {:?}, current: {:?}",
                 server_sender_read.server_received_times,
@@ -458,8 +471,9 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
 
             if options.use_ping {
                 log_debug!("Try ping from loop checker");
-                let id: String = get_id(server_sender_read.db.clone()).await;
+                let db = server_sender_read.db.clone();
                 drop(server_sender_read);
+                let id: String = get_id(db).await;
                 server_sender.send(make_ping_message(&id)).await;
             }
         }
@@ -483,6 +497,11 @@ pub async fn get_outer_connect(
     server_sender: RwServerSender,
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
+    // Skip if already attempting to connect
+    if server_sender.read().await.is_try_connect {
+        return Ok(());
+    }
+
     // If already connected, just update status
     if server_sender.is_valid_server_ip().await {
         server_sender.send_status(SenderStatus::Connected).await;

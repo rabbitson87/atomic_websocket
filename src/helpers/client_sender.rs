@@ -82,8 +82,13 @@ impl ClientSenders {
         if let Some(existing) = self.clients.get(peer) {
             let _ = existing.sx.send(make_disconnect_message(peer)).await;
         }
-        self.clients
-            .insert(peer.to_owned(), ClientSender { sx, send_time: 0 });
+        self.clients.insert(
+            peer.to_owned(),
+            ClientSender {
+                sx,
+                send_time: now().timestamp(),
+            },
+        );
     }
 
     /// Retrieves the message receiver channel.
@@ -123,10 +128,11 @@ impl ClientSenders {
     /// O(n) where n is the number of clients
     pub fn check_client_send_time(&self) {
         let now = now().timestamp();
+        let timeout = self.options.client_timeout_seconds as i64;
         let keys_to_remove: Vec<String> = self
             .clients
             .iter()
-            .filter(|entry| entry.send_time + 30 < now)
+            .filter(|entry| entry.send_time + timeout < now)
             .map(|entry| entry.key().clone())
             .collect();
 
@@ -319,13 +325,13 @@ impl ClientSendersTrait for RwClientSenders {
             log_error!("Failed to serialize data: {:?}", e);
             return;
         }
-        self.write().await.send_handle_message(buf, peer).await;
+        self.read().await.send_handle_message(buf, peer).await;
     }
 
     /// Sends a message to the application message handler (raw bytes version).
     #[cfg(not(feature = "bebop"))]
     async fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
-        self.write().await.send_handle_message(data, peer).await;
+        self.read().await.send_handle_message(data, peer).await;
     }
 
     /// Sends a message to a specific client.
@@ -610,8 +616,9 @@ mod tests {
         let senders = create_test_client_senders();
         let (tx, _rx) = mpsc::channel(8);
 
-        // 클라이언트 추가 (send_time = 0, 1970년)
+        // 클라이언트 추가 후 send_time을 0으로 설정하여 비활성 상태 시뮬레이션
         senders.add("peer1", tx).await;
+        senders.clients.get_mut("peer1").unwrap().send_time = 0;
 
         // send_time이 0이므로 현재 시간보다 30초 이상 오래됨
         // check_client_send_time 호출 시 제거되어야 함
@@ -653,6 +660,10 @@ mod tests {
         senders.add("active", tx2).await;
         senders.add("inactive2", tx3).await;
 
+        // inactive 클라이언트들의 send_time을 0으로 설정하여 비활성 상태 시뮬레이션
+        senders.clients.get_mut("inactive1").unwrap().send_time = 0;
+        senders.clients.get_mut("inactive2").unwrap().send_time = 0;
+
         // active만 시간 업데이트
         senders.write_time("active");
 
@@ -687,9 +698,10 @@ mod tests {
 
         senders.add("peer1", tx).await;
 
-        // 초기 send_time은 0
+        // 초기 send_time은 now()로 초기화됨
         let initial_time = senders.clients.get("peer1").unwrap().send_time;
-        assert_eq!(initial_time, 0);
+        let now_ts = crate::helpers::traits::date_time::now().timestamp();
+        assert!((initial_time - now_ts).abs() <= 1);
 
         // write_time 호출
         senders.write_time("peer1");
@@ -856,12 +868,13 @@ mod tests {
 
         senders.add("peer1", tx).await;
 
-        // 초기 send_time은 0
-        {
+        // 초기 send_time은 now()로 초기화됨
+        let initial_time = {
             let guard = senders.read().await;
             let time = guard.clients.get("peer1").unwrap().send_time;
-            assert_eq!(time, 0);
-        }
+            assert!(time > 0);
+            time
+        };
 
         // 메시지 전송
         let msg = Message::Binary(Bytes::from_static(b"test"));
@@ -871,11 +884,11 @@ mod tests {
         // 수신 확인
         let _ = rx.recv().await;
 
-        // send_time이 업데이트됨
+        // send_time이 업데이트됨 (초기값 이상)
         {
             let guard = senders.read().await;
             let time = guard.clients.get("peer1").unwrap().send_time;
-            assert!(time > 0);
+            assert!(time >= initial_time);
         }
     }
 
