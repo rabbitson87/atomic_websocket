@@ -60,7 +60,11 @@ pub async fn get_outer_websocket(
     use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 
     // Format the URL with 'wss://' scheme for secure WebSockets
-    let server_ip = format!("wss://{}", &options.url);
+    let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
+        options.url.clone()
+    } else {
+        format!("wss://{}", &options.url)
+    };
 
     // Configure TLS with root certificates from webpki-roots
     let root_store = RootCertStore {
@@ -122,7 +126,11 @@ pub async fn get_outer_websocket(
     use tokio_tungstenite::connect_async;
 
     // Format the URL with 'ws://' scheme for standard WebSockets
-    let server_ip = format!("ws://{}", &options.url);
+    let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
+        options.url.clone()
+    } else {
+        format!("ws://{}", &options.url)
+    };
     log_debug!("Connecting to WebSocket server: {:?}", &server_ip);
     if let Ok(Ok((ws_stream, _))) = timeout(
         Duration::from_secs(options.connect_timeout_seconds),

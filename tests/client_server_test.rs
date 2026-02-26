@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use atomic_websocket::client_sender::{ClientSenders, ClientSendersTrait, ServerOptions};
 use atomic_websocket::AtomicWebsocket;
-use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 
 use common::{
@@ -27,7 +26,7 @@ async fn test_server_starts_and_listens() {
     let addr = format!("127.0.0.1:{}", port);
 
     let options = ServerOptions::default();
-    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options).await;
+    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options).await.unwrap();
 
     short_delay().await;
 
@@ -44,7 +43,7 @@ async fn test_websocket_connection_upgrade() {
     let ws_url = format!("ws://127.0.0.1:{}", port);
 
     let options = ServerOptions::default();
-    let _server = AtomicWebsocket::get_internal_server(addr, options).await;
+    let _server = AtomicWebsocket::get_internal_server(addr, options).await.unwrap();
 
     short_delay().await;
 
@@ -75,7 +74,8 @@ async fn test_multiple_clients_connect() {
         options,
         client_senders.clone(),
     )
-    .await;
+    .await
+    .unwrap();
 
     short_delay().await;
 
@@ -104,11 +104,12 @@ async fn test_server_with_custom_client_senders() {
         options,
         client_senders.clone(),
     )
-    .await;
+    .await
+    .unwrap();
 
     short_delay().await;
 
-    assert_eq!(server.client_senders.read().await.len(), 0);
+    assert_eq!(server.client_senders.len(), 0);
 }
 
 // ============================================================================
@@ -162,7 +163,7 @@ async fn test_client_senders_send_to_nonexistent() {
 
 #[tokio::test]
 async fn test_client_senders_send_all_broadcast() {
-    let senders: Arc<RwLock<ClientSenders>> = Arc::new(RwLock::new(ClientSenders::new()));
+    let senders: Arc<ClientSenders> = Arc::new(ClientSenders::new());
 
     let (tx1, mut rx1) = tokio::sync::mpsc::channel(8);
     let (tx2, mut rx2) = tokio::sync::mpsc::channel(8);
@@ -182,7 +183,7 @@ async fn test_client_senders_send_all_broadcast() {
 
 #[tokio::test]
 async fn test_handle_message_receiver() {
-    let mut senders = ClientSenders::new();
+    let senders = ClientSenders::new();
     let mut rx = senders.get_handle_message_receiver();
 
     senders

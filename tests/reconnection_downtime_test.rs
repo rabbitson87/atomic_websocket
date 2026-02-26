@@ -74,6 +74,7 @@ async fn setup_external_client(
         atomic_websocket_type: AtomicWebsocketType::External,
         #[cfg(feature = "rustls")]
         use_tls: false,
+        ..Default::default()
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
@@ -122,6 +123,7 @@ async fn setup_internal_client_no_connect(
         atomic_websocket_type: AtomicWebsocketType::Internal,
         #[cfg(feature = "rustls")]
         use_tls: false,
+        ..Default::default()
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
@@ -543,6 +545,7 @@ async fn test_external_no_false_disconnect_when_never_connected() {
         atomic_websocket_type: AtomicWebsocketType::External,
         #[cfg(feature = "rustls")]
         use_tls: false,
+        ..Default::default()
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(

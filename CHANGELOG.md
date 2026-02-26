@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.2v
+
+* Add metrics, middleware, TLS support and refactor interior mutability.
+
 ## 0.7.1v
 
 * Improve connection stabiliation.

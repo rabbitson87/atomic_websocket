@@ -16,7 +16,7 @@ use atomic_websocket::{
 };
 use bebop::Record;
 use tokio::{
-    sync::{mpsc::Receiver, Mutex, RwLock},
+    sync::{mpsc::Receiver, Mutex},
     time::sleep,
 };
 
@@ -47,7 +47,8 @@ async fn server_start(address: String) {
         option,
         client_senders().clone(),
     )
-    .await;
+    .await
+    .unwrap();
     let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
 
     tokio::spawn(receive_server_handle_message(handle_message_receiver));
@@ -114,5 +115,5 @@ pub fn db() -> &'static DB {
 
 pub fn client_senders() -> &'static RwClientSenders {
     static BUILDER: OnceLock<RwClientSenders> = OnceLock::new();
-    BUILDER.get_or_init(|| Arc::new(RwLock::new(ClientSenders::new())))
+    BUILDER.get_or_init(|| Arc::new(ClientSenders::new()))
 }

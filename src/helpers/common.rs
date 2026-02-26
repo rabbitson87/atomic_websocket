@@ -110,6 +110,30 @@ pub async fn set_setting(db: DB, settings: Settings) -> Result<bool, Box<dyn Err
     Ok(true)
 }
 
+#[cfg(feature = "native-db")]
+#[allow(dead_code)]
+pub async fn remove_setting(db: DB, key: String) -> Result<bool, Box<dyn Error>> {
+    let db = db.lock().await;
+    let reader = db.r_transaction()?;
+    let setting = reader.get().primary::<Settings>(key)?;
+    drop(reader);
+
+    if let Some(setting) = setting {
+        let writer = db.rw_transaction()?;
+        writer.remove::<Settings>(setting)?;
+        writer.commit()?;
+    }
+    Ok(true)
+}
+
+#[cfg(not(feature = "native-db"))]
+#[allow(dead_code)]
+pub async fn remove_setting(db: DB, key: String) -> Result<bool, Box<dyn Error>> {
+    let mut db = db.lock().await;
+    db.remove(&key);
+    Ok(true)
+}
+
 #[cfg(feature = "bebop")]
 pub fn make_ping_message(peer: &str) -> Message {
     let mut datas = Vec::with_capacity(64);

@@ -151,7 +151,7 @@ pub async fn handle_websocket(
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
-    let (sx, mut rx) = mpsc::channel(8);
+    let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
     let id = get_id(db.clone()).await;
     server_sender.add(sx.clone(), &server_ip).await;
 
@@ -286,7 +286,7 @@ pub async fn handle_websocket(
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
-    let (sx, mut rx) = mpsc::channel(8);
+    let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
     server_sender.add(sx.clone(), &server_ip).await;
 
     // Without bebop there is no pong handshake, so emit Connected immediately

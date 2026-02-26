@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.7.1"
+version = "0.7.2"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -28,11 +28,14 @@ thiserror = "2.0.17"
 bebop = { version = "3.2.3", optional = true }
 dashmap = "6.1"
 chrono = { version = "0.4.43", default-features = false, features = ["clock"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1.0.228", features = ["derive"] }
 
 rustls = { version = "0.23.36", features = [
     "ring",
 ], default-features = false, optional = true }
+tokio-rustls = { version = "0.26", default-features = false, optional = true }
+rustls-pemfile = { version = "2", optional = true }
 webpki-roots = { version = "1.0.5", optional = true }
 rinf = { version = "8.8.1", optional = true }
 log = { version = "0.4.29", optional = true }
@@ -45,7 +48,13 @@ default = ["native-db", "bebop"]
 native-db = ["dep:native_db", "dep:native_model"]
 bebop = ["dep:bebop"]
 debug = ["dep:log"]
-rustls = ["dep:rustls", "tokio-tungstenite/__rustls-tls", "dep:webpki-roots"]
+rustls = [
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "tokio-tungstenite/__rustls-tls",
+    "dep:webpki-roots",
+]
 rinf = ["dep:rinf"]
 
 [dev-dependencies]

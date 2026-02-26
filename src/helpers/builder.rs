@@ -3,9 +3,15 @@
 //! This module provides fluent builder APIs for constructing client and server
 //! configurations, making it easier to set up connections with sensible defaults.
 
+use std::sync::Arc;
+
 use crate::AtomicWebsocketType;
 
-use super::{internal_client::ClientOptions, internal_server::ServerOptions};
+use super::{
+    internal_client::ClientOptions,
+    internal_server::ServerOptions,
+    middleware::MessageMiddleware,
+};
 
 /// Builder for constructing [`ClientOptions`] with a fluent API.
 ///
@@ -103,6 +109,24 @@ impl ClientOptionsBuilder {
         self
     }
 
+    /// Sets the buffer size for the incoming message handler channel (default: 256).
+    pub fn handler_buffer_size(mut self, size: usize) -> Self {
+        self.options.handler_buffer_size = size;
+        self
+    }
+
+    /// Sets the buffer size for the connection status channel (default: 8).
+    pub fn status_buffer_size(mut self, size: usize) -> Self {
+        self.options.status_buffer_size = size;
+        self
+    }
+
+    /// Sets the buffer size for per-connection outgoing message channels (default: 8).
+    pub fn per_connection_buffer_size(mut self, size: usize) -> Self {
+        self.options.per_connection_buffer_size = size;
+        self
+    }
+
     /// Builds and returns the configured [`ClientOptions`].
     pub fn build(self) -> ClientOptions {
         self.options
@@ -156,6 +180,81 @@ impl ServerOptionsBuilder {
     pub fn client_timeout_seconds(mut self, seconds: u64) -> Self {
         self.options.client_timeout_seconds = seconds;
         self
+    }
+
+    /// Sets the interval in seconds for checking inactive clients (default: 15).
+    pub fn client_check_interval_secs(mut self, seconds: u64) -> Self {
+        self.options.client_check_interval_secs = seconds;
+        self
+    }
+
+    /// Sets the buffer size for per-connection outgoing message channels (default: 8).
+    pub fn per_connection_buffer_size(mut self, size: usize) -> Self {
+        self.options.per_connection_buffer_size = size;
+        self
+    }
+
+    /// Sets the buffer size for the application message handler channel (default: 1024).
+    pub fn handler_buffer_size(mut self, size: usize) -> Self {
+        self.options.handler_buffer_size = size;
+        self
+    }
+
+    /// Adds a middleware to the server's middleware chain.
+    ///
+    /// Middlewares are called in the order they are added. They can intercept
+    /// connections, messages, and disconnections.
+    pub fn middleware(mut self, mw: Arc<dyn MessageMiddleware>) -> Self {
+        self.options.middlewares.push(mw);
+        self
+    }
+
+    /// Sets a pre-built TLS `ServerConfig` for secure WebSocket connections.
+    ///
+    /// Only available when the `rustls` feature is enabled.
+    #[cfg(feature = "rustls")]
+    pub fn tls_config(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
+        self.options.tls_config = Some(config);
+        self
+    }
+
+    /// Loads TLS certificate and private key from PEM files and configures TLS.
+    ///
+    /// Only available when the `rustls` feature is enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `cert_path` - Path to the PEM-encoded certificate chain file
+    /// * `key_path` - Path to the PEM-encoded private key file
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Self)` on success, or an `io::Error` if loading/parsing fails
+    #[cfg(feature = "rustls")]
+    pub fn tls_from_pem(
+        mut self,
+        cert_path: &str,
+        key_path: &str,
+    ) -> std::io::Result<Self> {
+        use std::io::{BufReader, ErrorKind};
+        use std::sync::Arc;
+
+        let cert_file = std::fs::File::open(cert_path)?;
+        let key_file = std::fs::File::open(key_path)?;
+
+        let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+            .collect::<Result<_, _>>()?;
+
+        let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))?
+            .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "no private key found"))?;
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+
+        self.options.tls_config = Some(Arc::new(config));
+        Ok(self)
     }
 
     /// Builds and returns the configured [`ServerOptions`].

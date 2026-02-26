@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::error::Elapsed;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
@@ -32,7 +32,7 @@ pub async fn with_timeout<T, F: std::future::Future<Output = T>>(
 
 /// Creates a test RwClientSenders instance.
 pub fn create_test_rw_client_senders() -> RwClientSenders {
-    Arc::new(RwLock::new(ClientSenders::new()))
+    Arc::new(ClientSenders::new())
 }
 
 /// Waits for a short duration (useful for async operations to complete).

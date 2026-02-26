@@ -47,7 +47,7 @@ impl InMemoryStorage {
 
 pub type RwServerSender = Arc<RwLock<ServerSender>>;
 
-pub type RwClientSenders = Arc<RwLock<ClientSenders>>;
+pub type RwClientSenders = Arc<ClientSenders>;
 
 /// SaveKey constant string keys for database operations.
 /// These avoid repeated format!("{:?}", SaveKey::...) allocations.

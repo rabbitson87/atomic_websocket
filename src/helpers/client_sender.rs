@@ -11,9 +11,14 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[cfg(feature = "bebop")]
 use crate::schema::Data;
+use std::sync::Arc;
+
 use crate::{
     client_sender::ServerOptions,
-    helpers::{common::make_disconnect_message, retry::ExponentialBackoff, traits::date_time::now},
+    helpers::{
+        common::make_disconnect_message, metrics::Metrics, retry::ExponentialBackoff,
+        traits::date_time::now,
+    },
     log_debug, log_error,
 };
 
@@ -30,9 +35,11 @@ pub struct ClientSenders {
     /// Channel sender for passing received messages to the application
     handle_message_sx: Sender<(Vec<u8>, String)>,
     /// Channel receiver for obtaining received messages (consumed once)
-    handle_message_rx: Option<Receiver<(Vec<u8>, String)>>,
-    /// Server options for connection management
-    pub options: ServerOptions,
+    handle_message_rx: std::sync::Mutex<Option<Receiver<(Vec<u8>, String)>>>,
+    /// Server options for connection management (interior mutability for lock-free Arc sharing)
+    options: std::sync::RwLock<ServerOptions>,
+    /// Metrics counters for observability
+    pub metrics: Arc<Metrics>,
 }
 
 impl Default for ClientSenders {
@@ -50,12 +57,22 @@ impl ClientSenders {
     ///
     /// A new ClientSenders instance
     pub fn new() -> Self {
-        let (handle_message_sx, handle_message_rx) = mpsc::channel(1024);
+        Self::new_with_buffer_size(1024)
+    }
+
+    /// Creates a new ClientSenders instance with a custom handler buffer size.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler_buffer_size` - Buffer size for the application message handler channel
+    pub fn new_with_buffer_size(handler_buffer_size: usize) -> Self {
+        let (handle_message_sx, handle_message_rx) = mpsc::channel(handler_buffer_size);
         Self {
             clients: DashMap::new(),
             handle_message_sx,
-            handle_message_rx: Some(handle_message_rx),
-            options: ServerOptions::default(),
+            handle_message_rx: std::sync::Mutex::new(Some(handle_message_rx)),
+            options: std::sync::RwLock::new(ServerOptions::default()),
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -89,6 +106,8 @@ impl ClientSenders {
                 send_time: now().timestamp(),
             },
         );
+        self.metrics.inc_connections_total();
+        self.metrics.inc_connections_active();
     }
 
     /// Retrieves the message receiver channel.
@@ -102,10 +121,25 @@ impl ClientSenders {
     /// # Panics
     ///
     /// Panics if the receiver has already been taken
-    pub fn get_handle_message_receiver(&mut self) -> Receiver<(Vec<u8>, String)> {
+    pub fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
         self.handle_message_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .take()
             .expect("Receiver already taken")
+    }
+
+    /// Sets the server options. Thread-safe via internal RwLock.
+    pub fn set_options(&self, options: ServerOptions) {
+        *self.options.write().unwrap_or_else(|e| e.into_inner()) = options;
+    }
+
+    /// Returns a clone of the current server options.
+    pub fn options(&self) -> ServerOptions {
+        self.options
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Sends a message to the application message handler.
@@ -115,6 +149,7 @@ impl ClientSenders {
     /// * `data` - Binary message data
     /// * `peer` - Client identifier
     pub async fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
+        self.metrics.inc_messages_received();
         let _ = self.handle_message_sx.send((data, peer.to_owned())).await;
     }
 
@@ -128,7 +163,11 @@ impl ClientSenders {
     /// O(n) where n is the number of clients
     pub fn check_client_send_time(&self) {
         let now = now().timestamp();
-        let timeout = self.options.client_timeout_seconds as i64;
+        let timeout = self
+            .options
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .client_timeout_seconds as i64;
         let keys_to_remove: Vec<String> = self
             .clients
             .iter()
@@ -136,8 +175,10 @@ impl ClientSenders {
             .map(|entry| entry.key().clone())
             .collect();
 
-        for key in keys_to_remove {
-            self.clients.remove(&key);
+        for key in &keys_to_remove {
+            if self.clients.remove(key).is_some() {
+                self.metrics.dec_connections_active();
+            }
         }
     }
 
@@ -151,7 +192,9 @@ impl ClientSenders {
     ///
     /// O(1) average case for DashMap removal
     pub fn remove(&self, peer: &str) {
-        self.clients.remove(peer);
+        if self.clients.remove(peer).is_some() {
+            self.metrics.dec_connections_active();
+        }
         log_debug!("Remove peer: {:?}", peer);
     }
 
@@ -198,7 +241,10 @@ impl ClientSenders {
 
         loop {
             match sender.send(message.clone()).await {
-                Ok(_) => return true,
+                Ok(_) => {
+                    self.metrics.inc_messages_sent();
+                    return true;
+                }
                 Err(e) => {
                     log_error!(
                         "Error sending message (attempt {}): {:?}",
@@ -206,6 +252,7 @@ impl ClientSenders {
                         e
                     );
                     if !backoff.wait().await {
+                        self.metrics.inc_send_errors();
                         log_error!("Failed to send after {} retries", backoff.count());
                         return false;
                     }
@@ -260,6 +307,24 @@ impl ClientSenders {
             .map(|entry| entry.key().clone())
             .collect()
     }
+
+    /// Returns peers NOT in the provided set.
+    pub fn peers_except(&self, valid: &std::collections::HashSet<&String>) -> Vec<String> {
+        self.clients
+            .iter()
+            .filter(|entry| !valid.contains(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Returns peers that ARE in the provided set.
+    pub fn peers_in(&self, target: &std::collections::HashSet<&String>) -> Vec<String> {
+        self.clients
+            .iter()
+            .filter(|entry| target.contains(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
 }
 
 /// Trait defining operations for client connection management.
@@ -303,21 +368,19 @@ pub trait ClientSendersTrait {
 
 /// Implementation of ClientSendersTrait for thread-safe client senders.
 ///
-/// This implementation wraps a ClientSenders instance with read-write locks
-/// to provide thread-safe access.
+/// Since `RwClientSenders` is now `Arc<ClientSenders>` (no outer RwLock),
+/// all thread safety comes from interior mutability: DashMap for clients,
+/// std::sync::Mutex for the receiver, and std::sync::RwLock for options.
 #[async_trait]
 impl ClientSendersTrait for RwClientSenders {
-    /// Adds or updates a client connection.
     async fn add(&self, peer: &str, sx: Sender<Message>) {
-        self.write().await.add(peer, sx).await;
+        (**self).add(peer, sx).await;
     }
 
-    /// Gets the message receiver channel.
     async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
-        self.write().await.get_handle_message_receiver()
+        (**self).get_handle_message_receiver()
     }
 
-    /// Sends a message to the application message handler.
     #[cfg(feature = "bebop")]
     async fn send_handle_message(&self, data: Data<'_>, peer: &str) {
         let mut buf = Vec::new();
@@ -325,98 +388,61 @@ impl ClientSendersTrait for RwClientSenders {
             log_error!("Failed to serialize data: {:?}", e);
             return;
         }
-        self.read().await.send_handle_message(buf, peer).await;
+        (**self).send_handle_message(buf, peer).await;
     }
 
-    /// Sends a message to the application message handler (raw bytes version).
     #[cfg(not(feature = "bebop"))]
     async fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
-        self.read().await.send_handle_message(data, peer).await;
+        (**self).send_handle_message(data, peer).await;
     }
 
-    /// Sends a message to a specific client.
+    /// Sends a message to a specific client with retry and bookkeeping.
     ///
-    /// Updates the client's last message time on success or removes the client on failure.
+    /// Delegates to `ClientSenders::send()` for the actual send+retry,
+    /// then updates send time on success or removes the peer on failure.
     async fn send(&self, peer: &str, message: Message) -> bool {
-        let result = self.read().await.send(peer, message).await;
-
+        let result = (**self).send(peer, message).await;
         match result {
-            true => self.write().await.write_time(peer),
-            false => self.write().await.remove(peer),
+            true => (**self).write_time(peer),
+            false => (**self).remove(peer),
         }
         result
     }
 
-    /// Sends expiration messages to clients not in the provided list.
-    ///
-    /// Uses HashSet for O(1) lookups instead of O(n) contains checks.
     async fn expire_send(&self, peer_list: &[String]) {
         use std::collections::HashSet;
         let valid_peers: HashSet<&String> = peer_list.iter().collect();
-
-        // Collect peers to expire first to avoid holding lock during sends
-        let peers_to_expire: Vec<String> = self
-            .read()
-            .await
-            .peers()
-            .into_iter()
-            .filter(|peer| !valid_peers.contains(peer))
-            .collect();
-
+        let peers_to_expire = (**self).peers_except(&valid_peers);
         for peer in peers_to_expire {
             self.send(&peer, make_expired_output_message()).await;
         }
     }
 
-    /// Checks if a client is active.
     async fn is_active(&self, peer: &str) -> bool {
-        self.read().await.is_active(peer)
+        (**self).is_active(peer)
     }
 
-    /// Sends a message to clients in the provided list.
-    ///
-    /// Uses HashSet for O(1) lookups instead of O(n) contains checks.
     async fn send_message_in_list(&self, peer_list: &[String], message: Message) {
         use std::collections::HashSet;
         let target_peers: HashSet<&String> = peer_list.iter().collect();
-
-        // Collect matching peers first to avoid holding lock during sends
-        let peers_to_send: Vec<String> = self
-            .read()
-            .await
-            .peers()
-            .into_iter()
-            .filter(|peer| target_peers.contains(peer))
-            .collect();
-
-        for peer in peers_to_send {
+        let peers = (**self).peers_in(&target_peers);
+        for peer in peers {
             self.send(&peer, message.clone()).await;
         }
     }
 
-    /// Sends a message to all connected clients.
     async fn send_all(&self, message: Message) {
-        let all_peers: Vec<String> = self.read().await.peers();
-
+        let all_peers = (**self).peers();
         for peer in all_peers {
             self.send(&peer, message.clone()).await;
         }
     }
 
-    /// Sends a message to all connected clients in the provided list.
     async fn send_all_in_list(&self, peer_list: &[String], message: Message) {
         use std::collections::HashSet;
         let target_peers: HashSet<&String> = peer_list.iter().collect();
-
-        let peers_to_send: Vec<String> = self
-            .read()
-            .await
-            .peers()
-            .into_iter()
-            .filter(|peer| target_peers.contains(peer))
-            .collect();
-
-        for peer in peers_to_send {
+        let peers = (**self).peers_in(&target_peers);
+        for peer in peers {
             self.send(&peer, message.clone()).await;
         }
     }
@@ -548,14 +574,14 @@ mod tests {
 
     #[test]
     fn test_client_senders_get_handle_message_receiver() {
-        let mut senders = create_test_client_senders();
+        let senders = create_test_client_senders();
         let _rx = senders.get_handle_message_receiver();
         // Receiver should be taken successfully
     }
 
     #[tokio::test]
     async fn test_client_senders_send_handle_message() {
-        let mut senders = create_test_client_senders();
+        let senders = create_test_client_senders();
         let mut rx = senders.get_handle_message_receiver();
 
         senders.send_handle_message(vec![1, 2, 3], "peer1").await;
@@ -728,11 +754,8 @@ mod tests {
     // ClientSendersTrait 브로드캐스트 동작 검증 테스트
     // ========================================================================
 
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
     fn create_rw_client_senders() -> RwClientSenders {
-        Arc::new(RwLock::new(ClientSenders::new()))
+        Arc::new(ClientSenders::new())
     }
 
     #[tokio::test]
@@ -870,8 +893,7 @@ mod tests {
 
         // 초기 send_time은 now()로 초기화됨
         let initial_time = {
-            let guard = senders.read().await;
-            let time = guard.clients.get("peer1").unwrap().send_time;
+            let time = senders.clients.get("peer1").unwrap().send_time;
             assert!(time > 0);
             time
         };
@@ -886,8 +908,7 @@ mod tests {
 
         // send_time이 업데이트됨 (초기값 이상)
         {
-            let guard = senders.read().await;
-            let time = guard.clients.get("peer1").unwrap().send_time;
+            let time = senders.clients.get("peer1").unwrap().send_time;
             assert!(time >= initial_time);
         }
     }

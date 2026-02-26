@@ -19,12 +19,13 @@ use crate::helpers::{
     server_sender::{SenderStatus, ServerSenderTrait},
     traits::date_time::now,
 };
-use crate::{log_debug, log_error, AtomicWebsocketType, Settings};
+use crate::{helpers::metrics::Metrics, log_debug, log_error, AtomicWebsocketType, Settings};
 #[cfg(feature = "bebop")]
 use bebop::Record;
 
 use tokio::sync::mpsc::Receiver;
 use tokio::time::{Instant, MissedTickBehavior};
+use tokio_util::sync::CancellationToken;
 
 use super::types::{save_key, RwServerSender, DB};
 
@@ -56,6 +57,15 @@ pub struct ClientOptions {
     /// Whether to use TLS for secure connections (only available with rustls feature)
     #[cfg(feature = "rustls")]
     pub use_tls: bool,
+
+    /// Buffer size for the incoming message handler channel (default: 256)
+    pub handler_buffer_size: usize,
+
+    /// Buffer size for the connection status channel (default: 8)
+    pub status_buffer_size: usize,
+
+    /// Buffer size for the per-connection outgoing message channel (default: 8)
+    pub per_connection_buffer_size: usize,
 }
 
 impl Default for ClientOptions {
@@ -69,6 +79,9 @@ impl Default for ClientOptions {
             atomic_websocket_type: AtomicWebsocketType::Internal,
             #[cfg(feature = "rustls")]
             use_tls: true,
+            handler_buffer_size: 256,
+            status_buffer_size: 8,
+            per_connection_buffer_size: 8,
         }
     }
 }
@@ -77,12 +90,16 @@ impl Default for ClientOptions {
 ///
 /// Manages connection establishment, message handling, and reconnection logic
 /// for both internal (local network) and external server connections.
+/// Supports graceful disconnect via `disconnect()`.
 pub struct AtomicClient {
     /// Server sender for message handling
     pub server_sender: RwServerSender,
 
     /// Client configuration options
     pub options: ClientOptions,
+
+    /// Cancellation token for graceful shutdown
+    pub(crate) cancel_token: CancellationToken,
 }
 
 impl AtomicClient {
@@ -99,6 +116,7 @@ impl AtomicClient {
         tokio::spawn(internal_ping_loop_cheker(
             self.server_sender.clone(),
             self.options.clone(),
+            self.cancel_token.clone(),
         ));
     }
 
@@ -117,7 +135,17 @@ impl AtomicClient {
         tokio::spawn(outer_ping_loop_cheker(
             self.server_sender.clone(),
             self.options.clone(),
+            self.cancel_token.clone(),
         ));
+    }
+
+    /// Gracefully disconnects the client.
+    ///
+    /// Cancels all background tasks (ping loop checker) and cleans up
+    /// the connection state.
+    pub async fn disconnect(&self) {
+        self.cancel_token.cancel();
+        self.server_sender.remove_ip().await;
     }
 
     /// Initiates a connection to an external server.
@@ -256,6 +284,11 @@ impl AtomicClient {
     pub async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>> {
         self.server_sender.get_handle_message_receiver().await
     }
+
+    /// Returns a reference to the client's metrics counters.
+    pub async fn metrics(&self) -> std::sync::Arc<Metrics> {
+        self.server_sender.read().await.metrics.clone()
+    }
 }
 
 /// Periodic health check for internal network connections.
@@ -263,12 +296,18 @@ impl AtomicClient {
 /// Monitors connection health by tracking message timestamps and sends ping
 /// messages when needed. Handles reconnection attempts when connection is lost.
 ///
+/// Uses `remove_ip_if_valid_server_ip` which handles clearing stored connection
+/// info across all feature flag combinations (native-db/in-memory, bebop/raw).
+///
 /// # Arguments
 ///
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options
-#[cfg(all(feature = "native-db", feature = "bebop"))]
-async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
+async fn internal_ping_loop_cheker(
+    server_sender: RwServerSender,
+    options: ClientOptions,
+    cancel_token: CancellationToken,
+) {
     let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
@@ -278,7 +317,13 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                log_debug!("internal_ping_loop_cheker cancelled");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
         let server_sender_read = server_sender.read().await;
 
         // Check if connection is dead (no messages received for 4x retry period)
@@ -289,107 +334,14 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
             drop(server_sender_read);
             server_sender.send_status(SenderStatus::Disconnected).await;
 
-            // Clear server IP if not keeping it
+            // Clear server IP and stored connection info if not keeping it
             if !use_keep_ip {
-                server_sender.remove_ip().await;
-                let db = server_sender.read().await.db.clone();
-                let server_connect_info =
-                    match get_setting_by_key(db.clone(), save_key::SERVER_CONNECT_INFO.to_owned())
-                        .await
-                    {
-                        Ok(server_connect_info) => server_connect_info,
-                        Err(error) => {
-                            log_error!("Failed to get server_connect_info {error:?}");
-                            None
-                        }
-                    };
-
-                // Reset stored server IP in database
-                if let Some(server_connect_info) = server_connect_info {
-                    if let Ok(mut info) = ServerConnectInfo::deserialize(&server_connect_info.value)
-                    {
-                        info.server_ip = "";
-                        let mut value = Vec::new();
-                        if info.serialize(&mut value).is_ok() {
-                            let db = db.lock().await;
-                            if let Ok(writer) = db.rw_transaction() {
-                                if writer
-                                    .update::<Settings>(
-                                        server_connect_info,
-                                        Settings {
-                                            key: save_key::SERVER_CONNECT_INFO.to_owned(),
-                                            value,
-                                        },
-                                    )
-                                    .is_ok()
-                                {
-                                    let _ = writer.commit();
-                                }
-                            }
-                        }
-                    }
-                }
+                server_sender.remove_ip_if_valid_server_ip("").await;
             }
 
             // Attempt reconnection
-            let db = server_sender.read().await.db.clone();
-            let server_sender = server_sender.clone();
-            let options = options.clone();
-            tokio::spawn(async move {
-                let _ = get_internal_connect(None, db, server_sender, options).await;
-                true
-            });
-        }
-        // Send a ping if no messages for 2x retry period
-        else if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 2)
-                < now().timestamp()
-        {
-            log_debug!(
-                "send: {:?}, current: {:?}",
-                server_sender_read.server_received_times,
-                now().timestamp()
-            );
-            if options.use_ping {
-                log_debug!("Try ping from loop checker");
-                let db = server_sender_read.db.clone();
-                drop(server_sender_read);
-                let id: String = get_id(db).await;
-                server_sender.send(make_ping_message(&id)).await;
-            }
-        }
-        log_debug!("loop server checker finish");
-    }
-}
-
-/// Periodic health check for internal network connections (simplified version).
-#[cfg(not(all(feature = "native-db", feature = "bebop")))]
-async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
-    let retry_seconds = options.retry_seconds.max(1);
-    let use_keep_ip = options.use_keep_ip;
-    let mut interval = tokio::time::interval_at(
-        Instant::now() + Duration::from_secs(retry_seconds),
-        Duration::from_secs(retry_seconds),
-    );
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    loop {
-        interval.tick().await;
-        let server_sender_read = server_sender.read().await;
-
-        // Check if connection is dead
-        if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 4)
-                < now().timestamp()
-        {
-            drop(server_sender_read);
-            server_sender.send_status(SenderStatus::Disconnected).await;
-
-            if !use_keep_ip {
-                server_sender.remove_ip().await;
-            }
-
-            // Attempt reconnection
+            server_sender.send_status(SenderStatus::Reconnecting).await;
+            server_sender.read().await.metrics.inc_reconnections();
             let db = server_sender.read().await.db.clone();
             let server_sender = server_sender.clone();
             let options = options.clone();
@@ -424,7 +376,11 @@ async fn internal_ping_loop_cheker(server_sender: RwServerSender, options: Clien
 ///
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options
-async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOptions) {
+async fn outer_ping_loop_cheker(
+    server_sender: RwServerSender,
+    options: ClientOptions,
+    cancel_token: CancellationToken,
+) {
     let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
     let mut interval = tokio::time::interval_at(
@@ -434,7 +390,13 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                log_debug!("outer_ping_loop_cheker cancelled");
+                break;
+            }
+            _ = interval.tick() => {}
+        }
         let server_sender_read = server_sender.read().await;
 
         // Check if connection is dead (no messages for 4x retry period)
@@ -450,6 +412,8 @@ async fn outer_ping_loop_cheker(server_sender: RwServerSender, options: ClientOp
             }
 
             // Attempt reconnection
+            server_sender.send_status(SenderStatus::Reconnecting).await;
+            server_sender.read().await.metrics.inc_reconnections();
             let server_sender = server_sender.clone();
             let options = options.clone();
             let db = server_sender.read().await.db.clone();
@@ -519,6 +483,7 @@ pub async fn get_outer_connect(
     }
 
     // Spawn connection task
+    server_sender.send_status(SenderStatus::Connecting).await;
     tokio::spawn(wrap_get_outer_websocket(db, server_sender, options));
     Ok(())
 }
@@ -623,6 +588,7 @@ pub async fn get_internal_connect(
     }
 
     // Connect directly to known server IP or use discovery
+    server_sender.send_status(SenderStatus::Connecting).await;
     match connect_info_data.server_ip {
         // Empty server IP means use local network discovery
         "" => {
@@ -679,6 +645,7 @@ pub async fn get_internal_connect(
     }
 
     // Use local network discovery
+    server_sender.send_status(SenderStatus::Connecting).await;
     let (server_ip, ws_stream) = ScanManager::new("9000").run().await;
     tokio::spawn(async move {
         if let Err(error) =
@@ -755,6 +722,7 @@ mod tests {
             atomic_websocket_type: AtomicWebsocketType::External,
             #[cfg(feature = "rustls")]
             use_tls: false,
+            ..Default::default()
         };
 
         let cloned = options.clone();
@@ -780,6 +748,7 @@ mod tests {
             atomic_websocket_type: AtomicWebsocketType::Internal,
             #[cfg(feature = "rustls")]
             use_tls: true,
+            ..Default::default()
         };
 
         assert!(!options.use_ping);

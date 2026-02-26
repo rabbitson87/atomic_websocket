@@ -74,7 +74,7 @@
 //!         address.to_string(),
 //!         options,
 //!         client_senders.clone(),
-//!     ).await;
+//!     ).await?;
 //!
 //!     // Set up message handler
 //!     let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
@@ -154,8 +154,19 @@ pub mod builder {
     pub use crate::helpers::builder::{ClientOptionsBuilder, ServerOptionsBuilder};
 }
 
+/// Module providing metrics and observability.
+pub mod metrics {
+    pub use crate::helpers::metrics::{Metrics, MetricsSnapshot};
+}
+
+/// Module providing middleware/interceptor pattern for WebSocket message handling.
+pub mod middleware {
+    pub use crate::helpers::middleware::{MessageMiddleware, MiddlewareResult};
+}
+
 use server_sender::{ServerSender, ServerSenderTrait};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use types::{RwClientSenders, RwServerSender};
 
 #[cfg(feature = "bebop")]
@@ -284,15 +295,18 @@ impl AtomicWebsocket {
     ///
     /// # Returns
     ///
-    /// A newly created `AtomicServer` instance
+    /// A `Result` containing the new `AtomicServer` instance, or an IO error if binding fails
     ///
     /// # Examples
     ///
     /// ```rust,ignore
     /// let server_options = ServerOptions::default();
-    /// let server = AtomicWebsocket::get_internal_server("127.0.0.1:9000".to_string(), server_options).await;
+    /// let server = AtomicWebsocket::get_internal_server("127.0.0.1:9000".to_string(), server_options).await?;
     /// ```
-    pub async fn get_internal_server(addr: String, option: ServerOptions) -> AtomicServer {
+    pub async fn get_internal_server(
+        addr: String,
+        option: ServerOptions,
+    ) -> std::io::Result<AtomicServer> {
         AtomicServer::new(&addr, option, None).await
     }
 
@@ -306,12 +320,12 @@ impl AtomicWebsocket {
     ///
     /// # Returns
     ///
-    /// A newly created `AtomicServer` instance
+    /// A `Result` containing the new `AtomicServer` instance, or an IO error if binding fails
     pub async fn get_internal_server_with_client_senders(
         addr: String,
         option: ServerOptions,
         client_senders: RwClientSenders,
-    ) -> AtomicServer {
+    ) -> std::io::Result<AtomicServer> {
         AtomicServer::new(&addr, option, Some(client_senders)).await
     }
 }
@@ -350,9 +364,11 @@ async fn get_client(
     };
     server_sender.regist(server_sender.clone()).await;
 
+    let cancel_token = CancellationToken::new();
     let atomic_websocket: AtomicClient = AtomicClient {
         server_sender,
         options,
+        cancel_token,
     };
     match atomic_websocket.options.atomic_websocket_type {
         AtomicWebsocketType::Internal => atomic_websocket.internal_initialize(db.clone()).await,
