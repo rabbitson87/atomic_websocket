@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.4
+
+* Add spillover for dropped client send message
+
 ## 0.7.3
 
 * Add spillover for dropped send message

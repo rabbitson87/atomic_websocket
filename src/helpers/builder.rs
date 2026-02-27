@@ -207,6 +207,15 @@ impl ServerOptionsBuilder {
         self
     }
 
+    /// Sets the maximum spillover buffer size for handler messages (default: 1024).
+    ///
+    /// When the handler channel is full, messages are buffered here instead of
+    /// blocking. Messages are dropped only when this buffer also reaches its cap.
+    pub fn spillover_buffer_size(mut self, size: usize) -> Self {
+        self.options.spillover_buffer_size = size;
+        self
+    }
+
     /// Adds a middleware to the server's middleware chain.
     ///
     /// Middlewares are called in the order they are added. They can intercept

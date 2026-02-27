@@ -6,6 +6,7 @@ use async_trait::async_trait;
 #[cfg(feature = "bebop")]
 use bebop::Record;
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -40,6 +41,10 @@ pub struct ClientSenders {
     options: std::sync::RwLock<ServerOptions>,
     /// Metrics counters for observability
     pub metrics: Arc<Metrics>,
+    /// Spillover buffer: stores handler messages when channel is full (non-blocking)
+    spillover: std::sync::Mutex<VecDeque<(Vec<u8>, String)>>,
+    /// Maximum spillover buffer capacity
+    spillover_buffer_size: usize,
 }
 
 impl Default for ClientSenders {
@@ -57,15 +62,16 @@ impl ClientSenders {
     ///
     /// A new ClientSenders instance
     pub fn new() -> Self {
-        Self::new_with_buffer_size(1024)
+        Self::new_with_buffer_size(1024, 1024)
     }
 
-    /// Creates a new ClientSenders instance with a custom handler buffer size.
+    /// Creates a new ClientSenders instance with custom buffer sizes.
     ///
     /// # Arguments
     ///
     /// * `handler_buffer_size` - Buffer size for the application message handler channel
-    pub fn new_with_buffer_size(handler_buffer_size: usize) -> Self {
+    /// * `spillover_buffer_size` - Maximum spillover buffer capacity for handler messages
+    pub fn new_with_buffer_size(handler_buffer_size: usize, spillover_buffer_size: usize) -> Self {
         let (handle_message_sx, handle_message_rx) = mpsc::channel(handler_buffer_size);
         Self {
             clients: DashMap::new(),
@@ -73,6 +79,8 @@ impl ClientSenders {
             handle_message_rx: std::sync::Mutex::new(Some(handle_message_rx)),
             options: std::sync::RwLock::new(ServerOptions::default()),
             metrics: Arc::new(Metrics::new()),
+            spillover: std::sync::Mutex::new(VecDeque::new()),
+            spillover_buffer_size,
         }
     }
 
@@ -142,15 +150,60 @@ impl ClientSenders {
             .clone()
     }
 
-    /// Sends a message to the application message handler.
+    /// Forwards received message data to the application (non-blocking).
+    ///
+    /// Uses `try_send` to avoid blocking the WebSocket read loop.
+    /// If the handler channel is full, messages are buffered in a spillover
+    /// queue and drained on subsequent calls. Messages are dropped only
+    /// when the spillover buffer also reaches its cap.
     ///
     /// # Arguments
     ///
     /// * `data` - Binary message data
     /// * `peer` - Client identifier
-    pub async fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
+    pub fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
         self.metrics.inc_messages_received();
-        let _ = self.handle_message_sx.send((data, peer.to_owned())).await;
+
+        // Step 1: drain any previously buffered messages first (ordering)
+        self.drain_spillover();
+
+        // Step 2: attempt direct send or buffer
+        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
+        if spillover.is_empty() {
+            match self.handle_message_sx.try_send((data, peer.to_owned())) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
+                    if spillover.len() < self.spillover_buffer_size {
+                        spillover.push_back(item);
+                    } else {
+                        self.metrics.inc_messages_dropped();
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    log_error!("Handle message channel closed");
+                }
+            }
+        } else {
+            // Spillover is non-empty — queue to maintain message ordering
+            if spillover.len() < self.spillover_buffer_size {
+                spillover.push_back((data, peer.to_owned()));
+            } else {
+                self.metrics.inc_messages_dropped();
+            }
+        }
+    }
+
+    /// Drains buffered spillover messages into the handler channel.
+    fn drain_spillover(&self) {
+        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(item) = spillover.front().cloned() {
+            match self.handle_message_sx.try_send(item) {
+                Ok(()) => {
+                    spillover.pop_front();
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     /// Checks for client timeouts and removes inactive clients.
@@ -388,12 +441,12 @@ impl ClientSendersTrait for RwClientSenders {
             log_error!("Failed to serialize data: {:?}", e);
             return;
         }
-        (**self).send_handle_message(buf, peer).await;
+        (**self).send_handle_message(buf, peer);
     }
 
     #[cfg(not(feature = "bebop"))]
     async fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
-        (**self).send_handle_message(data, peer).await;
+        (**self).send_handle_message(data, peer);
     }
 
     /// Sends a message to a specific client with retry and bookkeeping.
@@ -584,7 +637,7 @@ mod tests {
         let senders = create_test_client_senders();
         let mut rx = senders.get_handle_message_receiver();
 
-        senders.send_handle_message(vec![1, 2, 3], "peer1").await;
+        senders.send_handle_message(vec![1, 2, 3], "peer1");
 
         let received = rx.recv().await;
         assert!(received.is_some());

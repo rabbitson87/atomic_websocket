@@ -26,7 +26,9 @@ async fn test_server_starts_and_listens() {
     let addr = format!("127.0.0.1:{}", port);
 
     let options = ServerOptions::default();
-    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options).await.unwrap();
+    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options)
+        .await
+        .unwrap();
 
     short_delay().await;
 
@@ -43,7 +45,9 @@ async fn test_websocket_connection_upgrade() {
     let ws_url = format!("ws://127.0.0.1:{}", port);
 
     let options = ServerOptions::default();
-    let _server = AtomicWebsocket::get_internal_server(addr, options).await.unwrap();
+    let _server = AtomicWebsocket::get_internal_server(addr, options)
+        .await
+        .unwrap();
 
     short_delay().await;
 
@@ -186,9 +190,7 @@ async fn test_handle_message_receiver() {
     let senders = ClientSenders::new();
     let mut rx = senders.get_handle_message_receiver();
 
-    senders
-        .send_handle_message(vec![1, 2, 3], "test_peer")
-        .await;
+    senders.send_handle_message(vec![1, 2, 3], "test_peer");
 
     let result = with_timeout(Duration::from_millis(100), rx.recv()).await;
     assert!(result.is_ok());

@@ -81,6 +81,11 @@ pub struct ServerOptions {
     /// Buffer size for the application message handler channel (default: 1024)
     pub handler_buffer_size: usize,
 
+    /// Maximum size of the spillover buffer for handler messages (default: 1024).
+    /// When the handler channel is full, messages are buffered here instead of
+    /// blocking. Messages are dropped only when this buffer also reaches its cap.
+    pub spillover_buffer_size: usize,
+
     /// Middleware chain for intercepting WebSocket events.
     /// Middlewares are called in order; if any returns `Stop` on a message, it is dropped.
     pub middlewares: Vec<Arc<dyn MessageMiddleware>>,
@@ -101,6 +106,7 @@ impl Default for ServerOptions {
             client_check_interval_secs: 15,
             per_connection_buffer_size: 8,
             handler_buffer_size: 1024,
+            spillover_buffer_size: 1024,
             middlewares: Vec::new(),
             #[cfg(feature = "rustls")]
             tls_config: None,
@@ -135,6 +141,7 @@ impl AtomicServer {
             Some(client_senders) => client_senders,
             None => Arc::new(ClientSenders::new_with_buffer_size(
                 option.handler_buffer_size,
+                option.spillover_buffer_size,
             )),
         };
 
