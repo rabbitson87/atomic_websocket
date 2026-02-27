@@ -5,7 +5,6 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "bebop")]
@@ -435,15 +434,18 @@ impl ServerSenderTrait for RwServerSender {
         };
 
         // Phase 3: Retry loop — NO LOCK HELD
-        let send_timeout = Duration::from_secs(options.retry_seconds.max(1));
+        // Uses cooperative blocking (no timeout) so that under backpressure the
+        // sender waits for the channel to drain instead of prematurely declaring
+        // the connection dead.  send().await returns Err only when the receiver
+        // half is dropped (channel closed), which is the real disconnection signal.
         let mut backoff = ExponentialBackoff::new(50, 1, limit_count);
         loop {
-            match tokio::time::timeout(send_timeout, sender.send(message.clone())).await {
-                Ok(Ok(_)) => {
+            match sender.send(message.clone()).await {
+                Ok(_) => {
                     metrics.inc_messages_sent();
                     return;
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     log_error!(
                         "Send error (channel closed, attempt {}): {:?}",
                         backoff.count() + 1,
@@ -452,30 +454,6 @@ impl ServerSenderTrait for RwServerSender {
                     if !backoff.wait().await {
                         metrics.inc_send_errors();
                         // Retries exhausted: notify disconnection + spawn reconnection
-                        let _ = status_tx.try_send(SenderStatus::Disconnected);
-                        if let Some(ref ss) = server_sender_ref {
-                            match options.atomic_websocket_type {
-                                AtomicWebsocketType::Internal => {
-                                    tokio::spawn(wrap_get_internal_websocket(
-                                        db,
-                                        ss.clone(),
-                                        server_ip,
-                                        options,
-                                    ));
-                                }
-                                AtomicWebsocketType::External => {
-                                    tokio::spawn(wrap_get_outer_websocket(db, ss.clone(), options));
-                                }
-                            }
-                        }
-                        return;
-                    }
-                }
-                Err(_) => {
-                    // Timeout: per-connection channel full but open
-                    log_error!("Send timeout (attempt {})", backoff.count() + 1);
-                    if !backoff.wait().await {
-                        metrics.inc_send_errors();
                         let _ = status_tx.try_send(SenderStatus::Disconnected);
                         if let Some(ref ss) = server_sender_ref {
                             match options.atomic_websocket_type {

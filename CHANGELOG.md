@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.5
+
+* Remove send timeout to prevent false disconnection under backpressure
+
 ## 0.7.4
 
 * Add spillover for dropped client send message
