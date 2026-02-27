@@ -66,6 +66,11 @@ pub struct ClientOptions {
 
     /// Buffer size for the per-connection outgoing message channel (default: 8)
     pub per_connection_buffer_size: usize,
+
+    /// Maximum size of the spillover buffer for handler messages (default: 1024).
+    /// When the handler channel is full, messages are buffered here instead of
+    /// blocking. Messages are dropped only when this buffer also reaches its cap.
+    pub spillover_buffer_size: usize,
 }
 
 impl Default for ClientOptions {
@@ -82,6 +87,7 @@ impl Default for ClientOptions {
             handler_buffer_size: 256,
             status_buffer_size: 8,
             per_connection_buffer_size: 8,
+            spillover_buffer_size: 1024,
         }
     }
 }
@@ -341,8 +347,11 @@ async fn internal_ping_loop_cheker(
 
             // Attempt reconnection
             server_sender.send_status(SenderStatus::Reconnecting).await;
-            server_sender.read().await.metrics.inc_reconnections();
-            let db = server_sender.read().await.db.clone();
+            let (metrics, db) = {
+                let guard = server_sender.read().await;
+                (guard.metrics.clone(), guard.db.clone())
+            };
+            metrics.inc_reconnections();
             let server_sender = server_sender.clone();
             let options = options.clone();
             tokio::spawn(async move {
@@ -413,10 +422,13 @@ async fn outer_ping_loop_cheker(
 
             // Attempt reconnection
             server_sender.send_status(SenderStatus::Reconnecting).await;
-            server_sender.read().await.metrics.inc_reconnections();
+            let (metrics, db) = {
+                let guard = server_sender.read().await;
+                (guard.metrics.clone(), guard.db.clone())
+            };
+            metrics.inc_reconnections();
             let server_sender = server_sender.clone();
             let options = options.clone();
-            let db = server_sender.read().await.db.clone();
             tokio::spawn(async move {
                 let _ = get_outer_connect(db, server_sender, options).await;
                 true

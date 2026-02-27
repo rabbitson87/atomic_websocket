@@ -3,7 +3,9 @@
 //! This module provides functionality for managing connections to WebSocket servers,
 //! including message sending, connection status tracking, and automatic reconnection.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "bebop")]
@@ -110,6 +112,8 @@ pub struct ServerSender {
     pub is_try_connect: bool,
     /// Metrics counters for observability
     pub metrics: Arc<Metrics>,
+    /// Spillover buffer: stores messages when handler channel is full (non-blocking)
+    spillover: std::sync::Mutex<VecDeque<Vec<u8>>>,
 }
 
 impl ServerSender {
@@ -141,6 +145,7 @@ impl ServerSender {
             options,
             is_try_connect: false,
             metrics: Arc::new(Metrics::new()),
+            spillover: std::sync::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -235,18 +240,56 @@ impl ServerSender {
         true
     }
 
-    /// Forwards received message data to the application.
+    /// Forwards received message data to the application (non-blocking).
     ///
-    /// Applies backpressure by awaiting channel capacity. This prevents
-    /// message loss when the consumer is slow, at the cost of slowing
-    /// the WebSocket read loop.
+    /// Uses `try_send` to avoid blocking the WebSocket read loop.
+    /// If the handler channel is full, messages are buffered in a spillover
+    /// queue and drained on subsequent calls. Messages are dropped only
+    /// when the spillover buffer also reaches its cap.
     ///
     /// # Arguments
     ///
     /// * `data` - Binary message data
-    pub async fn send_handle_message(&self, data: Vec<u8>) {
-        if self.handle_message_tx.send(data).await.is_err() {
-            log_error!("Handle message channel closed");
+    pub fn send_handle_message(&self, data: Vec<u8>) {
+        // Step 1: drain any previously buffered messages first (ordering)
+        self.drain_spillover();
+
+        // Step 2: attempt direct send or buffer
+        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
+        if spillover.is_empty() {
+            match self.handle_message_tx.try_send(data) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
+                    if spillover.len() < self.options.spillover_buffer_size {
+                        spillover.push_back(data);
+                    } else {
+                        self.metrics.inc_messages_dropped();
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    log_error!("Handle message channel closed");
+                }
+            }
+        } else {
+            // Spillover is non-empty — queue to maintain message ordering
+            if spillover.len() < self.options.spillover_buffer_size {
+                spillover.push_back(data);
+            } else {
+                self.metrics.inc_messages_dropped();
+            }
+        }
+    }
+
+    /// Drains buffered spillover messages into the handler channel.
+    fn drain_spillover(&self) {
+        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
+        while let Some(data) = spillover.front().cloned() {
+            match self.handle_message_tx.try_send(data) {
+                Ok(()) => {
+                    spillover.pop_front();
+                }
+                Err(_) => break,
+            }
         }
     }
 }
@@ -339,7 +382,7 @@ impl ServerSenderTrait for RwServerSender {
         self.read().await.send_status(status);
     }
 
-    /// Forwards received message data to the application.
+    /// Forwards received message data to the application (non-blocking with spillover).
     #[cfg(feature = "bebop")]
     async fn send_handle_message(&self, data: Data<'_>) {
         let mut buf = Vec::new();
@@ -349,23 +392,15 @@ impl ServerSenderTrait for RwServerSender {
         }
         let guard = self.read().await;
         guard.metrics.inc_messages_received();
-        let tx = guard.handle_message_tx.clone();
-        drop(guard);
-        if tx.send(buf).await.is_err() {
-            log_error!("Handle message channel closed");
-        }
+        guard.send_handle_message(buf);
     }
 
-    /// Forwards received message data to the application (raw bytes version).
+    /// Forwards received message data to the application (non-blocking with spillover).
     #[cfg(not(feature = "bebop"))]
     async fn send_handle_message(&self, data: Vec<u8>) {
         let guard = self.read().await;
         guard.metrics.inc_messages_received();
-        let tx = guard.handle_message_tx.clone();
-        drop(guard);
-        if tx.send(data).await.is_err() {
-            log_error!("Handle message channel closed");
-        }
+        guard.send_handle_message(data);
     }
 
     /// Sends a message to the connected server.
@@ -400,18 +435,47 @@ impl ServerSenderTrait for RwServerSender {
         };
 
         // Phase 3: Retry loop — NO LOCK HELD
+        let send_timeout = Duration::from_secs(options.retry_seconds.max(1));
         let mut backoff = ExponentialBackoff::new(50, 1, limit_count);
         loop {
-            match sender.send(message.clone()).await {
-                Ok(_) => {
+            match tokio::time::timeout(send_timeout, sender.send(message.clone())).await {
+                Ok(Ok(_)) => {
                     metrics.inc_messages_sent();
                     return;
                 }
-                Err(e) => {
-                    log_error!("Send error (attempt {}): {:?}", backoff.count() + 1, e);
+                Ok(Err(e)) => {
+                    log_error!(
+                        "Send error (channel closed, attempt {}): {:?}",
+                        backoff.count() + 1,
+                        e
+                    );
                     if !backoff.wait().await {
                         metrics.inc_send_errors();
                         // Retries exhausted: notify disconnection + spawn reconnection
+                        let _ = status_tx.try_send(SenderStatus::Disconnected);
+                        if let Some(ref ss) = server_sender_ref {
+                            match options.atomic_websocket_type {
+                                AtomicWebsocketType::Internal => {
+                                    tokio::spawn(wrap_get_internal_websocket(
+                                        db,
+                                        ss.clone(),
+                                        server_ip,
+                                        options,
+                                    ));
+                                }
+                                AtomicWebsocketType::External => {
+                                    tokio::spawn(wrap_get_outer_websocket(db, ss.clone(), options));
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+                Err(_) => {
+                    // Timeout: per-connection channel full but open
+                    log_error!("Send timeout (attempt {})", backoff.count() + 1);
+                    if !backoff.wait().await {
+                        metrics.inc_send_errors();
                         let _ = status_tx.try_send(SenderStatus::Disconnected);
                         if let Some(ref ss) = server_sender_ref {
                             match options.atomic_websocket_type {
@@ -597,6 +661,29 @@ mod tests {
         ClientOptions::default()
     }
 
+    #[cfg(feature = "native-db")]
+    use std::sync::Arc;
+
+    #[cfg(feature = "native-db")]
+    use tokio::sync::Mutex;
+
+    #[cfg(feature = "native-db")]
+    fn create_test_db_native() -> DB {
+        use native_db::{Builder, Models};
+        let mut models = Models::new();
+        models.define::<Settings>().unwrap();
+        let models: &'static Models = Box::leak(Box::new(models));
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        Arc::new(Mutex::new(
+            Builder::new().create(models, temp.path()).unwrap(),
+        ))
+    }
+
+    #[cfg(feature = "native-db")]
+    fn create_test_options_native() -> ClientOptions {
+        ClientOptions::default()
+    }
+
     // ========================================================================
     // ServerSender 기본 동작 테스트
     // ========================================================================
@@ -747,13 +834,420 @@ mod tests {
 
         let mut rx = sender.get_handle_message_receiver();
 
-        // 메시지 전송
-        sender.send_handle_message(vec![1, 2, 3, 4, 5]).await;
+        // 메시지 전송 (now synchronous)
+        sender.send_handle_message(vec![1, 2, 3, 4, 5]);
 
         // 수신 확인
         let data = rx.recv().await;
         assert!(data.is_some());
         assert_eq!(data.unwrap(), vec![1, 2, 3, 4, 5]);
+    }
+
+    // ========================================================================
+    // Spillover buffer 테스트
+    // ========================================================================
+
+    /// 채널이 가득 찰 때 spillover buffer에 저장되는지 확인
+    #[cfg(not(feature = "native-db"))]
+    #[tokio::test]
+    async fn test_spillover_stores_when_channel_full() {
+        let db = create_test_db();
+        let mut options = create_test_options();
+        options.handler_buffer_size = 2; // 작은 채널로 빠르게 가득 차게 함
+        options.spillover_buffer_size = 10;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let mut rx = sender.get_handle_message_receiver();
+
+        // 채널 용량(2)을 채움
+        sender.send_handle_message(vec![1]);
+        sender.send_handle_message(vec![2]);
+
+        // 3번째부터는 spillover에 저장되어야 함
+        sender.send_handle_message(vec![3]);
+        sender.send_handle_message(vec![4]);
+        sender.send_handle_message(vec![5]);
+
+        // spillover에 3개 저장되었는지 확인
+        let spillover_len = sender.spillover.lock().unwrap().len();
+        assert_eq!(spillover_len, 3, "spillover에 3개 메시지가 저장되어야 함");
+
+        // 채널에서 1개 읽으면 spillover drain이 가능해짐
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, vec![1]);
+
+        // 다음 send_handle_message 호출 시 drain 시도
+        sender.send_handle_message(vec![6]);
+
+        // drain 후 spillover 확인 (채널 1칸 비었으므로 1개 drain + 새 메시지 1개 추가)
+        let spillover_len = sender.spillover.lock().unwrap().len();
+        assert!(
+            spillover_len <= 3,
+            "drain 후 spillover는 3 이하여야 함, actual: {}",
+            spillover_len
+        );
+
+        // 전체 메시지 순서 보장: 2, 3, 4, 5, 6 순으로 수신
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, vec![2]);
+    }
+
+    /// spillover buffer cap 초과 시 메시지 drop 확인
+    #[cfg(not(feature = "native-db"))]
+    #[test]
+    fn test_spillover_drops_when_cap_exceeded() {
+        let db = create_test_db();
+        let mut options = create_test_options();
+        options.handler_buffer_size = 1;
+        options.spillover_buffer_size = 3; // spillover cap = 3
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let _rx = sender.get_handle_message_receiver();
+
+        // 채널 1칸 채움
+        sender.send_handle_message(vec![1]);
+
+        // spillover 3칸 채움
+        sender.send_handle_message(vec![2]);
+        sender.send_handle_message(vec![3]);
+        sender.send_handle_message(vec![4]);
+
+        assert_eq!(sender.spillover.lock().unwrap().len(), 3);
+
+        // cap 초과 → drop되어야 함
+        sender.send_handle_message(vec![5]);
+        sender.send_handle_message(vec![6]);
+
+        // spillover 크기는 여전히 3 (cap)
+        assert_eq!(sender.spillover.lock().unwrap().len(), 3);
+
+        // drop된 메시지 수 확인 (metrics)
+        let snapshot = sender.metrics.snapshot();
+        assert_eq!(
+            snapshot.messages_dropped, 2,
+            "cap 초과로 2개 메시지가 drop되어야 함"
+        );
+    }
+
+    /// spillover drain 후 모든 메시지가 올바른 순서로 수신되는지 확인
+    #[cfg(not(feature = "native-db"))]
+    #[tokio::test]
+    async fn test_spillover_drain_preserves_order() {
+        let db = create_test_db();
+        let mut options = create_test_options();
+        options.handler_buffer_size = 2;
+        options.spillover_buffer_size = 100;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let mut rx = sender.get_handle_message_receiver();
+
+        // 채널(2) + spillover에 메시지 적재
+        for i in 1..=6u8 {
+            sender.send_handle_message(vec![i]);
+        }
+
+        // 채널: [1, 2], spillover: [3, 4, 5, 6]
+        assert_eq!(sender.spillover.lock().unwrap().len(), 4);
+
+        // 채널에서 모두 빼면서 drain 유도
+        let mut received = Vec::new();
+        // 채널에서 2개 읽기
+        received.push(rx.recv().await.unwrap());
+        received.push(rx.recv().await.unwrap());
+
+        // drain 유도: 새 메시지 전송 시 spillover drain 시도
+        sender.send_handle_message(vec![7]);
+
+        // 남은 메시지 모두 수신
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg);
+        }
+
+        // 순서 확인: 1, 2, 3, ... 순서가 보장되어야 함
+        for i in 0..received.len().saturating_sub(1) {
+            assert!(
+                received[i] <= received[i + 1],
+                "순서 위반: {:?} 다음에 {:?}",
+                received[i],
+                received[i + 1]
+            );
+        }
+    }
+
+    /// spillover buffer가 비어있을 때 drain이 무해한지 확인
+    #[cfg(not(feature = "native-db"))]
+    #[test]
+    fn test_spillover_drain_empty_is_noop() {
+        let db = create_test_db();
+        let sender = ServerSender::new(db, "".to_string(), create_test_options());
+
+        // 빈 상태에서 drain 호출 — 패닉 없어야 함
+        sender.drain_spillover();
+        assert_eq!(sender.spillover.lock().unwrap().len(), 0);
+    }
+
+    // ========================================================================
+    // Spillover buffer 테스트 (native-db)
+    // ========================================================================
+
+    /// [native-db] 채널이 가득 찰 때 spillover buffer에 저장되는지 확인
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn test_spillover_stores_when_channel_full_native_db() {
+        let db = create_test_db_native();
+        let mut options = create_test_options_native();
+        options.handler_buffer_size = 2;
+        options.spillover_buffer_size = 10;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let mut rx = sender.get_handle_message_receiver();
+
+        // 채널 용량(2)을 채움
+        sender.send_handle_message(vec![1]);
+        sender.send_handle_message(vec![2]);
+
+        // 3번째부터는 spillover에 저장되어야 함
+        sender.send_handle_message(vec![3]);
+        sender.send_handle_message(vec![4]);
+        sender.send_handle_message(vec![5]);
+
+        let spillover_len = sender.spillover.lock().unwrap().len();
+        assert_eq!(spillover_len, 3, "spillover에 3개 메시지가 저장되어야 함");
+
+        // 채널에서 1개 읽으면 spillover drain이 가능해짐
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, vec![1]);
+
+        // drain 유도
+        sender.send_handle_message(vec![6]);
+
+        let spillover_len = sender.spillover.lock().unwrap().len();
+        assert!(
+            spillover_len <= 3,
+            "drain 후 spillover는 3 이하여야 함, actual: {}",
+            spillover_len
+        );
+
+        let msg = rx.recv().await.unwrap();
+        assert_eq!(msg, vec![2]);
+    }
+
+    /// [native-db] spillover buffer cap 초과 시 메시지 drop 확인
+    #[cfg(feature = "native-db")]
+    #[test]
+    fn test_spillover_drops_when_cap_exceeded_native_db() {
+        let db = create_test_db_native();
+        let mut options = create_test_options_native();
+        options.handler_buffer_size = 1;
+        options.spillover_buffer_size = 3;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let _rx = sender.get_handle_message_receiver();
+
+        // 채널 1칸 + spillover 3칸 채움
+        sender.send_handle_message(vec![1]);
+        sender.send_handle_message(vec![2]);
+        sender.send_handle_message(vec![3]);
+        sender.send_handle_message(vec![4]);
+
+        assert_eq!(sender.spillover.lock().unwrap().len(), 3);
+
+        // cap 초과 → drop
+        sender.send_handle_message(vec![5]);
+        sender.send_handle_message(vec![6]);
+
+        assert_eq!(sender.spillover.lock().unwrap().len(), 3);
+
+        let snapshot = sender.metrics.snapshot();
+        assert_eq!(
+            snapshot.messages_dropped, 2,
+            "cap 초과로 2개 메시지가 drop되어야 함"
+        );
+    }
+
+    /// [native-db] spillover drain 후 메시지 순서 보장 확인
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn test_spillover_drain_preserves_order_native_db() {
+        let db = create_test_db_native();
+        let mut options = create_test_options_native();
+        options.handler_buffer_size = 2;
+        options.spillover_buffer_size = 100;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let mut rx = sender.get_handle_message_receiver();
+
+        for i in 1..=6u8 {
+            sender.send_handle_message(vec![i]);
+        }
+
+        assert_eq!(sender.spillover.lock().unwrap().len(), 4);
+
+        let mut received = Vec::new();
+        received.push(rx.recv().await.unwrap());
+        received.push(rx.recv().await.unwrap());
+
+        // drain 유도
+        sender.send_handle_message(vec![7]);
+
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg);
+        }
+
+        for i in 0..received.len().saturating_sub(1) {
+            assert!(
+                received[i] <= received[i + 1],
+                "순서 위반: {:?} 다음에 {:?}",
+                received[i],
+                received[i + 1]
+            );
+        }
+    }
+
+    /// [native-db] spillover buffer 빈 상태에서 drain 안전성 확인
+    #[cfg(feature = "native-db")]
+    #[test]
+    fn test_spillover_drain_empty_is_noop_native_db() {
+        let db = create_test_db_native();
+        let sender = ServerSender::new(db, "".to_string(), create_test_options_native());
+
+        sender.drain_spillover();
+        assert_eq!(sender.spillover.lock().unwrap().len(), 0);
+    }
+
+    // ========================================================================
+    // Spillover 완전 복구 테스트 — 채널 막힘 → spillover 저장 → 소비자 재개 → 전부 수신
+    // ========================================================================
+
+    /// 채널 가득 참 → spillover 저장 → 소비자가 읽기 시작 → spillover drain → 모든 메시지 수신 확인
+    #[cfg(not(feature = "native-db"))]
+    #[tokio::test]
+    async fn test_spillover_full_recovery_all_messages_received() {
+        let db = create_test_db();
+        let mut options = create_test_options();
+        options.handler_buffer_size = 3;
+        options.spillover_buffer_size = 100;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let mut rx = sender.get_handle_message_receiver();
+
+        let total_messages = 20u8;
+
+        // Phase 1: 소비자 없이 메시지 대량 전송 → 채널(3) 초과분은 spillover에 저장
+        for i in 1..=total_messages {
+            sender.send_handle_message(vec![i]);
+        }
+
+        // 채널에 3개, spillover에 17개
+        assert_eq!(sender.spillover.lock().unwrap().len(), 17);
+        assert_eq!(
+            sender.metrics.snapshot().messages_dropped,
+            0,
+            "drop 없어야 함"
+        );
+
+        // Phase 2: 소비자가 읽기 시작 — 읽을 때마다 drain 유도를 위해 send_handle_message 호출
+        let mut received = Vec::new();
+
+        // 채널에서 먼저 읽기
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg[0]);
+        }
+
+        // drain 유도: 소비자가 읽어서 채널에 빈 공간 생김 → drain_spillover
+        // drain은 send_handle_message 호출 시 발생하므로, 반복적으로 읽고 drain
+        loop {
+            sender.drain_spillover();
+
+            let mut drained_any = false;
+            while let Ok(msg) = rx.try_recv() {
+                received.push(msg[0]);
+                drained_any = true;
+            }
+
+            let remaining = sender.spillover.lock().unwrap().len();
+            if remaining == 0 && !drained_any {
+                break;
+            }
+        }
+
+        // Phase 3: 검증 — 모든 메시지가 순서대로 수신됨
+        assert_eq!(
+            received.len(),
+            total_messages as usize,
+            "전체 {}개 메시지 모두 수신되어야 함, actual: {}",
+            total_messages,
+            received.len()
+        );
+
+        let expected: Vec<u8> = (1..=total_messages).collect();
+        assert_eq!(
+            received, expected,
+            "메시지 순서가 1..={} 이어야 함",
+            total_messages
+        );
+
+        // spillover 완전히 비었는지 확인
+        assert_eq!(
+            sender.spillover.lock().unwrap().len(),
+            0,
+            "spillover 완전 drain"
+        );
+        assert_eq!(sender.metrics.snapshot().messages_dropped, 0, "drop 없음");
+    }
+
+    /// [native-db] 채널 가득 참 → spillover 저장 → 소비자 재개 → 모든 메시지 수신 확인
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn test_spillover_full_recovery_all_messages_received_native_db() {
+        let db = create_test_db_native();
+        let mut options = create_test_options_native();
+        options.handler_buffer_size = 3;
+        options.spillover_buffer_size = 100;
+        let mut sender = ServerSender::new(db, "".to_string(), options);
+
+        let mut rx = sender.get_handle_message_receiver();
+
+        let total_messages = 20u8;
+
+        // Phase 1: 소비자 없이 메시지 대량 전송
+        for i in 1..=total_messages {
+            sender.send_handle_message(vec![i]);
+        }
+
+        assert_eq!(sender.spillover.lock().unwrap().len(), 17);
+        assert_eq!(sender.metrics.snapshot().messages_dropped, 0);
+
+        // Phase 2: 소비자 재개 — 읽고 drain 반복
+        let mut received = Vec::new();
+
+        while let Ok(msg) = rx.try_recv() {
+            received.push(msg[0]);
+        }
+
+        loop {
+            sender.drain_spillover();
+
+            let mut drained_any = false;
+            while let Ok(msg) = rx.try_recv() {
+                received.push(msg[0]);
+                drained_any = true;
+            }
+
+            let remaining = sender.spillover.lock().unwrap().len();
+            if remaining == 0 && !drained_any {
+                break;
+            }
+        }
+
+        // Phase 3: 검증
+        assert_eq!(received.len(), total_messages as usize);
+
+        let expected: Vec<u8> = (1..=total_messages).collect();
+        assert_eq!(received, expected);
+
+        assert_eq!(sender.spillover.lock().unwrap().len(), 0);
+        assert_eq!(sender.metrics.snapshot().messages_dropped, 0);
     }
 
     // ========================================================================

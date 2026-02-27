@@ -8,9 +8,7 @@ use std::sync::Arc;
 use crate::AtomicWebsocketType;
 
 use super::{
-    internal_client::ClientOptions,
-    internal_server::ServerOptions,
-    middleware::MessageMiddleware,
+    internal_client::ClientOptions, internal_server::ServerOptions, middleware::MessageMiddleware,
 };
 
 /// Builder for constructing [`ClientOptions`] with a fluent API.
@@ -127,6 +125,15 @@ impl ClientOptionsBuilder {
         self
     }
 
+    /// Sets the maximum spillover buffer size for handler messages (default: 1024).
+    ///
+    /// When the handler channel is full, messages are buffered here instead of
+    /// blocking. Messages are dropped only when this buffer also reaches its cap.
+    pub fn spillover_buffer_size(mut self, size: usize) -> Self {
+        self.options.spillover_buffer_size = size;
+        self
+    }
+
     /// Builds and returns the configured [`ClientOptions`].
     pub fn build(self) -> ClientOptions {
         self.options
@@ -231,19 +238,15 @@ impl ServerOptionsBuilder {
     ///
     /// `Ok(Self)` on success, or an `io::Error` if loading/parsing fails
     #[cfg(feature = "rustls")]
-    pub fn tls_from_pem(
-        mut self,
-        cert_path: &str,
-        key_path: &str,
-    ) -> std::io::Result<Self> {
+    pub fn tls_from_pem(mut self, cert_path: &str, key_path: &str) -> std::io::Result<Self> {
         use std::io::{BufReader, ErrorKind};
         use std::sync::Arc;
 
         let cert_file = std::fs::File::open(cert_path)?;
         let key_file = std::fs::File::open(key_path)?;
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
-            .collect::<Result<_, _>>()?;
+        let certs: Vec<_> =
+            rustls_pemfile::certs(&mut BufReader::new(cert_file)).collect::<Result<_, _>>()?;
 
         let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))?
             .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "no private key found"))?;

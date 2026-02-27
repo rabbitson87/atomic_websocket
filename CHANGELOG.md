@@ -1,10 +1,14 @@
 # Changes
 
-## 0.7.2v
+## 0.7.3
+
+* Add spillover for dropped send message
+
+## 0.7.2
 
 * Add metrics, middleware, TLS support and refactor interior mutability.
 
-## 0.7.1v
+## 0.7.1
 
 * Improve connection stabiliation.
 
