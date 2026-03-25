@@ -125,7 +125,7 @@ pub mod schema {
 /// Module providing functionality for managing client connections on the server side.
 pub mod client_sender {
     pub use crate::helpers::client_sender::*;
-    pub use crate::helpers::internal_server::ServerOptions;
+    pub use crate::helpers::internal_server::{handle_upgraded_connection, ServerOptions};
 }
 
 /// Module providing functionality for managing server connections on the client side.

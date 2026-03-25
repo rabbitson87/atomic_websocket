@@ -150,30 +150,24 @@ impl ServerSender {
 
     /// Gets the receiver for connection status updates.
     ///
+    /// Returns `None` if the receiver has already been taken by a previous call.
+    ///
     /// # Returns
     ///
-    /// A channel receiver for connection status events
-    ///
-    /// # Panics
-    ///
-    /// Panics if the receiver has already been taken
-    pub fn get_status_receiver(&mut self) -> Receiver<SenderStatus> {
-        self.status_rx.take().expect("Receiver already taken")
+    /// `Some(Receiver)` on the first call, `None` on subsequent calls
+    pub fn get_status_receiver(&mut self) -> Option<Receiver<SenderStatus>> {
+        self.status_rx.take()
     }
 
     /// Gets the receiver for incoming messages.
     ///
+    /// Returns `None` if the receiver has already been taken by a previous call.
+    ///
     /// # Returns
     ///
-    /// A channel receiver for incoming message data
-    ///
-    /// # Panics
-    ///
-    /// Panics if the receiver has already been taken
-    pub fn get_handle_message_receiver(&mut self) -> Receiver<Vec<u8>> {
-        self.handle_message_rx
-            .take()
-            .expect("Receiver already taken")
+    /// `Some(Receiver)` on the first call, `None` on subsequent calls
+    pub fn get_handle_message_receiver(&mut self) -> Option<Receiver<Vec<u8>>> {
+        self.handle_message_rx.take()
     }
 
     /// Registers a reference to self for recursive operations.
@@ -250,14 +244,23 @@ impl ServerSender {
     ///
     /// * `data` - Binary message data
     pub fn send_handle_message(&self, data: Vec<u8>) {
+        // Single lock guard for both drain and send (reduces lock contention)
+        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
+
         // Step 1: drain any previously buffered messages first (ordering)
-        self.drain_spillover();
+        while let Some(data) = spillover.front().cloned() {
+            match self.handle_message_tx.try_send(data) {
+                Ok(()) => {
+                    spillover.pop_front();
+                }
+                Err(_) => break,
+            }
+        }
 
         // Step 2: attempt direct send or buffer
-        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
         if spillover.is_empty() {
             match self.handle_message_tx.try_send(data) {
-                Ok(()) => return,
+                Ok(()) => (),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(data)) => {
                     if spillover.len() < self.options.spillover_buffer_size {
                         spillover.push_back(data);
@@ -279,7 +282,8 @@ impl ServerSender {
         }
     }
 
-    /// Drains buffered spillover messages into the handler channel.
+    /// Drains buffered spillover messages into the handler channel (test-only).
+    #[cfg(test)]
     fn drain_spillover(&self) {
         let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
         while let Some(data) = spillover.front().cloned() {
@@ -314,10 +318,10 @@ pub trait ServerSenderTrait {
     async fn send_handle_message(&self, data: Vec<u8>);
 
     /// Gets the receiver for connection status updates.
-    async fn get_status_receiver(&self) -> Receiver<SenderStatus>;
+    async fn get_status_receiver(&self) -> Option<Receiver<SenderStatus>>;
 
     /// Gets the receiver for incoming messages.
-    async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>>;
+    async fn get_handle_message_receiver(&self) -> Option<Receiver<Vec<u8>>>;
 
     /// Sends a message to the connected server.
     async fn send(&self, message: Message);
@@ -363,12 +367,12 @@ impl ServerSenderTrait for RwServerSender {
     }
 
     /// Gets the receiver for connection status updates.
-    async fn get_status_receiver(&self) -> Receiver<SenderStatus> {
+    async fn get_status_receiver(&self) -> Option<Receiver<SenderStatus>> {
         self.write().await.get_status_receiver()
     }
 
     /// Gets the receiver for incoming messages.
-    async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>> {
+    async fn get_handle_message_receiver(&self) -> Option<Receiver<Vec<u8>>> {
         self.write().await.get_handle_message_receiver()
     }
 
@@ -384,7 +388,7 @@ impl ServerSenderTrait for RwServerSender {
     /// Forwards received message data to the application (non-blocking with spillover).
     #[cfg(feature = "bebop")]
     async fn send_handle_message(&self, data: Data<'_>) {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(256);
         if let Err(e) = data.serialize(&mut buf) {
             log_error!("Failed to serialize Data: {:?}", e);
             return;
@@ -687,20 +691,21 @@ mod tests {
         let db = create_test_db();
         let mut sender = ServerSender::new(db, "".to_string(), create_test_options());
 
-        // 첫 번째 호출: 성공
-        let _rx = sender.get_status_receiver();
+        // First call returns Some
+        let rx = sender.get_status_receiver();
+        assert!(rx.is_some());
         assert!(sender.status_rx.is_none());
     }
 
     #[cfg(not(feature = "native-db"))]
     #[test]
-    #[should_panic(expected = "Receiver already taken")]
-    fn test_server_sender_get_status_receiver_double_call_panics() {
+    fn test_server_sender_get_status_receiver_double_call_returns_none() {
         let db = create_test_db();
         let mut sender = ServerSender::new(db, "".to_string(), create_test_options());
 
         let _rx1 = sender.get_status_receiver();
-        let _rx2 = sender.get_status_receiver(); // 패닉 발생
+        let rx2 = sender.get_status_receiver();
+        assert!(rx2.is_none(), "Second call should return None");
     }
 
     #[cfg(not(feature = "native-db"))]
@@ -709,19 +714,21 @@ mod tests {
         let db = create_test_db();
         let mut sender = ServerSender::new(db, "".to_string(), create_test_options());
 
-        let _rx = sender.get_handle_message_receiver();
+        // First call returns Some
+        let rx = sender.get_handle_message_receiver();
+        assert!(rx.is_some());
         assert!(sender.handle_message_rx.is_none());
     }
 
     #[cfg(not(feature = "native-db"))]
     #[test]
-    #[should_panic(expected = "Receiver already taken")]
-    fn test_server_sender_get_handle_message_receiver_double_call_panics() {
+    fn test_server_sender_get_handle_message_receiver_double_call_returns_none() {
         let db = create_test_db();
         let mut sender = ServerSender::new(db, "".to_string(), create_test_options());
 
         let _rx1 = sender.get_handle_message_receiver();
-        let _rx2 = sender.get_handle_message_receiver(); // 패닉 발생
+        let rx2 = sender.get_handle_message_receiver();
+        assert!(rx2.is_none(), "Second call should return None");
     }
 
     #[cfg(not(feature = "native-db"))]
@@ -793,7 +800,7 @@ mod tests {
         let db = create_test_db();
         let mut sender = ServerSender::new(db, "".to_string(), create_test_options());
 
-        let mut rx = sender.get_status_receiver();
+        let mut rx = sender.get_status_receiver().expect("receiver");
 
         // 상태 전송
         sender.send_status(SenderStatus::Connected);
@@ -810,7 +817,7 @@ mod tests {
         let db = create_test_db();
         let mut sender = ServerSender::new(db, "".to_string(), create_test_options());
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         // 메시지 전송 (now synchronous)
         sender.send_handle_message(vec![1, 2, 3, 4, 5]);
@@ -835,7 +842,7 @@ mod tests {
         options.spillover_buffer_size = 10;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         // 채널 용량(2)을 채움
         sender.send_handle_message(vec![1]);
@@ -880,7 +887,7 @@ mod tests {
         options.spillover_buffer_size = 3; // spillover cap = 3
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let _rx = sender.get_handle_message_receiver();
+        let _rx = sender.get_handle_message_receiver().expect("receiver");
 
         // 채널 1칸 채움
         sender.send_handle_message(vec![1]);
@@ -917,7 +924,7 @@ mod tests {
         options.spillover_buffer_size = 100;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         // 채널(2) + spillover에 메시지 적재
         for i in 1..=6u8 {
@@ -978,7 +985,7 @@ mod tests {
         options.spillover_buffer_size = 10;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         // 채널 용량(2)을 채움
         sender.send_handle_message(vec![1]);
@@ -1020,7 +1027,7 @@ mod tests {
         options.spillover_buffer_size = 3;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let _rx = sender.get_handle_message_receiver();
+        let _rx = sender.get_handle_message_receiver().expect("receiver");
 
         // 채널 1칸 + spillover 3칸 채움
         sender.send_handle_message(vec![1]);
@@ -1053,7 +1060,7 @@ mod tests {
         options.spillover_buffer_size = 100;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         for i in 1..=6u8 {
             sender.send_handle_message(vec![i]);
@@ -1107,7 +1114,7 @@ mod tests {
         options.spillover_buffer_size = 100;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         let total_messages = 20u8;
 
@@ -1184,7 +1191,7 @@ mod tests {
         options.spillover_buffer_size = 100;
         let mut sender = ServerSender::new(db, "".to_string(), options);
 
-        let mut rx = sender.get_handle_message_receiver();
+        let mut rx = sender.get_handle_message_receiver().expect("receiver");
 
         let total_messages = 20u8;
 
@@ -1392,7 +1399,7 @@ mod tests {
     async fn test_trait_send_status_through_rwlock() {
         let sender = create_rw_server_sender();
 
-        let mut rx = sender.get_status_receiver().await;
+        let mut rx = sender.get_status_receiver().await.expect("receiver");
 
         sender.send_status(SenderStatus::Start).await;
 

@@ -184,10 +184,12 @@ impl AtomicServer {
 
     /// Gets a receiver for incoming messages from clients.
     ///
+    /// Returns `None` if the receiver has already been taken by a previous call.
+    ///
     /// # Returns
     ///
-    /// A channel receiver for message data along with client identifiers
-    pub async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
+    /// `Some(Receiver)` on the first call, `None` on subsequent calls
+    pub async fn get_handle_message_receiver(&self) -> Option<Receiver<(Vec<u8>, String)>> {
         self.client_senders.get_handle_message_receiver().await
     }
 
@@ -203,6 +205,27 @@ impl AtomicServer {
     /// Returns a reference to the server's metrics counters.
     pub fn metrics(&self) -> Arc<Metrics> {
         self.client_senders.metrics.clone()
+    }
+
+    /// Accepts a pre-upgraded WebSocket stream into the server's connection management.
+    ///
+    /// Use this when a WebSocket handshake has already been completed by an external
+    /// HTTP server (e.g., `atomic_http`). The stream is registered with the server's
+    /// `client_senders` and handled with the same middleware, metrics, and message
+    /// routing as connections accepted via `accept_async`.
+    pub fn accept_upgraded<S>(&self, peer: SocketAddr, ws_stream: WebSocketStream<S>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let cs = self.client_senders.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_upgraded_connection(cs, peer, ws_stream).await {
+                match e {
+                    Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => (),
+                    err => log_error!("Error processing upgraded connection: {}", err),
+                }
+            }
+        });
     }
 }
 
@@ -378,104 +401,133 @@ where
 {
     match accept_async(stream).await {
         Ok(ws_stream) => {
-            log_debug!("New WebSocket connection: {}", peer);
-            let (mut ostream, mut istream) = ws_stream.split();
-
-            let options = client_senders.options();
-            let buf_size = options.per_connection_buffer_size;
-            let (sx, mut rx) = mpsc::channel(buf_size);
-            tokio::spawn(async move {
-                let use_ping = options.use_ping;
-                let middlewares = options.middlewares;
-                let id =
-                    get_id_from_first_message(&mut istream, client_senders.clone(), sx.clone())
-                        .await;
-
-                if let Some(id) = id {
-                    // Check on_connect middlewares
-                    let mut connected = true;
-                    for mw in &middlewares {
-                        if !mw.on_connect(&id).await {
-                            connected = false;
-                            break;
-                        }
-                    }
-
-                    if connected {
-                        // Handle incoming messages
-                        while let Some(Ok(message)) = istream.next().await {
-                            let value = message.into_data();
-                            let data = match get_data_schema(&value) {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    log_error!("Error getting data schema: {:?}", e);
-                                    continue;
-                                }
-                            };
-
-                            // Handle ping messages
-                            if data.category == Category::Ping as u16 && use_ping {
-                                if let Ok(data) = Ping::deserialize(&data.datas) {
-                                    client_senders.send(data.peer, make_pong_message()).await;
-                                    continue;
-                                }
-                            }
-
-                            // Handle disconnect messages
-                            if data.category == Category::Disconnect as u16 {
-                                break;
-                            }
-
-                            // Middleware on_message check
-                            let mut should_forward = true;
-                            for mw in &middlewares {
-                                if mw.on_message(&id, &value).await == MiddlewareResult::Stop {
-                                    should_forward = false;
-                                    break;
-                                }
-                            }
-
-                            // Forward to application handler if not stopped by middleware
-                            if should_forward {
-                                client_senders.send_handle_message(data, &id).await;
-                            }
-                        }
-
-                        // Notify middlewares of disconnect
-                        for mw in &middlewares {
-                            mw.on_disconnect(&id).await;
-                        }
-                    }
-                }
-                // Always send disconnect when reader exits (stream closed or explicit disconnect)
-                let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
-            });
-
-            // Handle outgoing messages
-            while let Some(message) = rx.recv().await {
-                ostream.send(message.clone()).await?;
-                let data = message.into_data();
-                let data = match get_data_schema(&data) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        log_error!("Error getting data schema: {:?}", e);
-                        rx.close();
-                        break;
-                    }
-                };
-                log_debug!("Server sending message: {:?}", data);
-                if data.category == Category::Disconnect as u16 {
-                    rx.close();
-                    break;
-                }
-            }
-            log_debug!("client: {} disconnected", peer);
-            let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
+            inner_handle_ws(client_senders, peer, ws_stream).await?;
         }
         Err(e) => {
             log_debug!("Error accepting WebSocket connection: {:?}", e);
         }
     }
+
+    Ok(())
+}
+
+/// Handles a pre-upgraded WebSocket stream (bebop version).
+///
+/// Use this when the WebSocket handshake has already been completed externally
+/// (e.g., by an HTTP server that performed the 101 Switching Protocols upgrade).
+/// The stream is used directly without calling `accept_async`.
+#[cfg(feature = "bebop")]
+pub async fn handle_upgraded_connection<S>(
+    client_senders: RwClientSenders,
+    peer: SocketAddr,
+    ws_stream: WebSocketStream<S>,
+) -> tungstenite::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    inner_handle_ws(client_senders, peer, ws_stream).await
+}
+
+#[cfg(feature = "bebop")]
+async fn inner_handle_ws<S>(
+    client_senders: RwClientSenders,
+    peer: SocketAddr,
+    ws_stream: WebSocketStream<S>,
+) -> tungstenite::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    log_debug!("New WebSocket connection: {}", peer);
+    let (mut ostream, mut istream) = ws_stream.split();
+
+    let options = client_senders.options();
+    let buf_size = options.per_connection_buffer_size;
+    let (sx, mut rx) = mpsc::channel(buf_size);
+    tokio::spawn(async move {
+        let use_ping = options.use_ping;
+        let middlewares = options.middlewares;
+        let id = get_id_from_first_message(&mut istream, client_senders.clone(), sx.clone()).await;
+
+        if let Some(id) = id {
+            // Check on_connect middlewares
+            let mut connected = true;
+            for mw in &middlewares {
+                if !mw.on_connect(&id).await {
+                    connected = false;
+                    break;
+                }
+            }
+
+            if connected {
+                // Handle incoming messages
+                while let Some(Ok(message)) = istream.next().await {
+                    let value = message.into_data();
+                    let data = match get_data_schema(&value) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            log_error!("Error getting data schema: {:?}", e);
+                            continue;
+                        }
+                    };
+
+                    // Handle ping messages
+                    if data.category == Category::Ping as u16 && use_ping {
+                        if let Ok(data) = Ping::deserialize(&data.datas) {
+                            client_senders.send(data.peer, make_pong_message()).await;
+                            continue;
+                        }
+                    }
+
+                    // Handle disconnect messages
+                    if data.category == Category::Disconnect as u16 {
+                        break;
+                    }
+
+                    // Middleware on_message check
+                    let mut should_forward = true;
+                    for mw in &middlewares {
+                        if mw.on_message(&id, &value).await == MiddlewareResult::Stop {
+                            should_forward = false;
+                            break;
+                        }
+                    }
+
+                    // Forward to application handler if not stopped by middleware
+                    if should_forward {
+                        client_senders.send_handle_message(data, &id).await;
+                    }
+                }
+
+                // Notify middlewares of disconnect
+                for mw in &middlewares {
+                    mw.on_disconnect(&id).await;
+                }
+            }
+        }
+        // Always send disconnect when reader exits (stream closed or explicit disconnect)
+        let _ = sx.send(make_disconnect_message(&peer.to_string())).await;
+    });
+
+    // Handle outgoing messages
+    while let Some(message) = rx.recv().await {
+        ostream.send(message.clone()).await?;
+        let data = message.into_data();
+        let data = match get_data_schema(&data) {
+            Ok(data) => data,
+            Err(e) => {
+                log_error!("Error getting data schema: {:?}", e);
+                rx.close();
+                break;
+            }
+        };
+        log_debug!("Server sending message: {:?}", data);
+        if data.category == Category::Disconnect as u16 {
+            rx.close();
+            break;
+        }
+    }
+    log_debug!("client: {} disconnected", peer);
+    let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
 
     Ok(())
 }
@@ -497,68 +549,99 @@ where
 {
     match accept_async(stream).await {
         Ok(ws_stream) => {
-            log_debug!("New WebSocket connection: {}", peer);
-            let (mut ostream, mut istream) = ws_stream.split();
-
-            let options = client_senders.options();
-            let buf_size = options.per_connection_buffer_size;
-            let (sx, mut rx) = mpsc::channel(buf_size);
-            let peer_str = peer.to_string();
-            client_senders.add(&peer_str, sx.clone()).await;
-
-            tokio::spawn(async move {
-                let middlewares = options.middlewares;
-
-                // Check on_connect middlewares
-                let mut connected = true;
-                for mw in &middlewares {
-                    if !mw.on_connect(&peer_str).await {
-                        connected = false;
-                        break;
-                    }
-                }
-
-                if connected {
-                    // Handle incoming messages - pass raw bytes
-                    while let Some(Ok(message)) = istream.next().await {
-                        let value = message.into_data();
-
-                        // Middleware on_message check
-                        let mut should_forward = true;
-                        for mw in &middlewares {
-                            if mw.on_message(&peer_str, &value).await == MiddlewareResult::Stop {
-                                should_forward = false;
-                                break;
-                            }
-                        }
-
-                        if should_forward {
-                            client_senders
-                                .send_handle_message(value.to_vec(), &peer_str)
-                                .await;
-                        }
-                    }
-
-                    // Notify middlewares of disconnect
-                    for mw in &middlewares {
-                        mw.on_disconnect(&peer_str).await;
-                    }
-                }
-
-                let _ = sx.send(make_disconnect_message(&peer_str)).await;
-            });
-
-            // Handle outgoing messages
-            while let Some(message) = rx.recv().await {
-                ostream.send(message).await?;
-            }
-            log_debug!("client: {} disconnected", peer);
-            let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
+            inner_handle_ws(client_senders, peer, ws_stream).await?;
         }
         Err(e) => {
             log_debug!("Error accepting WebSocket connection: {:?}", e);
         }
     }
+
+    Ok(())
+}
+
+/// Handles a pre-upgraded WebSocket stream (raw bytes version).
+///
+/// Use this when the WebSocket handshake has already been completed externally
+/// (e.g., by an HTTP server that performed the 101 Switching Protocols upgrade).
+/// The stream is used directly without calling `accept_async`.
+#[cfg(not(feature = "bebop"))]
+pub async fn handle_upgraded_connection<S>(
+    client_senders: RwClientSenders,
+    peer: SocketAddr,
+    ws_stream: WebSocketStream<S>,
+) -> tungstenite::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    inner_handle_ws(client_senders, peer, ws_stream).await
+}
+
+#[cfg(not(feature = "bebop"))]
+async fn inner_handle_ws<S>(
+    client_senders: RwClientSenders,
+    peer: SocketAddr,
+    ws_stream: WebSocketStream<S>,
+) -> tungstenite::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    log_debug!("New WebSocket connection: {}", peer);
+    let (mut ostream, mut istream) = ws_stream.split();
+
+    let options = client_senders.options();
+    let buf_size = options.per_connection_buffer_size;
+    let (sx, mut rx) = mpsc::channel(buf_size);
+    let peer_str = peer.to_string();
+    client_senders.add(&peer_str, sx.clone()).await;
+
+    tokio::spawn(async move {
+        let middlewares = options.middlewares;
+
+        // Check on_connect middlewares
+        let mut connected = true;
+        for mw in &middlewares {
+            if !mw.on_connect(&peer_str).await {
+                connected = false;
+                break;
+            }
+        }
+
+        if connected {
+            // Handle incoming messages - pass raw bytes
+            while let Some(Ok(message)) = istream.next().await {
+                let value = message.into_data();
+
+                // Middleware on_message check
+                let mut should_forward = true;
+                for mw in &middlewares {
+                    if mw.on_message(&peer_str, &value).await == MiddlewareResult::Stop {
+                        should_forward = false;
+                        break;
+                    }
+                }
+
+                if should_forward {
+                    client_senders
+                        .send_handle_message(value.to_vec(), &peer_str)
+                        .await;
+                }
+            }
+
+            // Notify middlewares of disconnect
+            for mw in &middlewares {
+                mw.on_disconnect(&peer_str).await;
+            }
+        }
+
+        let _ = sx.send(make_disconnect_message(&peer_str)).await;
+    });
+
+    // Handle outgoing messages
+    while let Some(message) = rx.recv().await {
+        ostream.send(message).await?;
+    }
+    log_debug!("client: {} disconnected", peer);
+    let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
 
     Ok(())
 }

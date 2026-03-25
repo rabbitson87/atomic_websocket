@@ -1,5 +1,9 @@
 # Changes
 
+## 0.8.0
+
+* Improve performance, connection stability and WebSocket upgrade with safer APIs.
+
 ## 0.7.5
 
 * Remove send timeout to prevent false disconnection under backpressure

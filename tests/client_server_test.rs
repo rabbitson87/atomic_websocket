@@ -188,7 +188,7 @@ async fn test_client_senders_send_all_broadcast() {
 #[tokio::test]
 async fn test_handle_message_receiver() {
     let senders = ClientSenders::new();
-    let mut rx = senders.get_handle_message_receiver();
+    let mut rx = senders.get_handle_message_receiver().expect("receiver");
 
     senders.send_handle_message(vec![1, 2, 3], "test_peer");
 

@@ -33,6 +33,40 @@ use super::{
     types::{save_key, RwServerSender, DB},
 };
 
+/// Guard that resets `is_try_connect` to `false` on drop.
+///
+/// Ensures the flag is always reset even if the connection handler panics,
+/// preventing permanent connection lockout.
+struct TryConnectGuard {
+    server_sender: RwServerSender,
+    disarmed: bool,
+}
+
+impl TryConnectGuard {
+    fn new(server_sender: RwServerSender) -> Self {
+        Self {
+            server_sender,
+            disarmed: false,
+        }
+    }
+
+    /// Disarm the guard to prevent redundant reset on normal exit.
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for TryConnectGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let server_sender = self.server_sender.clone();
+            tokio::spawn(async move {
+                server_sender.write().await.is_try_connect = false;
+            });
+        }
+    }
+}
+
 /// Wrapper function for establishing an internal WebSocket connection.
 ///
 /// Handles errors from the connection attempt and logs them appropriately.
@@ -148,6 +182,9 @@ pub async fn handle_websocket(
         }
         guard.is_try_connect = true;
     }
+    // Safety guard: resets is_try_connect on panic or early exit
+    let mut connect_guard = TryConnectGuard::new(server_sender.clone());
+
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
@@ -263,7 +300,9 @@ pub async fn handle_websocket(
     }
     log_debug!("WebSocket closed");
     let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
+    // Normal exit: reset flag directly and disarm guard
     server_sender.write().await.is_try_connect = false;
+    connect_guard.disarm();
     Ok(())
 }
 
@@ -283,6 +322,9 @@ pub async fn handle_websocket(
         }
         guard.is_try_connect = true;
     }
+    // Safety guard: resets is_try_connect on panic or early exit
+    let mut connect_guard = TryConnectGuard::new(server_sender.clone());
+
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
@@ -332,7 +374,9 @@ pub async fn handle_websocket(
     }
     log_debug!("WebSocket closed");
     let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
+    // Normal exit: reset flag directly and disarm guard
     server_sender.write().await.is_try_connect = false;
+    connect_guard.disarm();
     Ok(())
 }
 

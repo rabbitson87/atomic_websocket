@@ -91,7 +91,7 @@ async fn setup_external_client(
     )
     .await;
 
-    let status_rx = client.get_status_receiver().await;
+    let status_rx = client.get_status_receiver().await.expect("status receiver");
 
     // Initiate connection
     client.get_outer_connect(db.clone()).await.unwrap();
@@ -140,7 +140,7 @@ async fn setup_internal_client_no_connect(
     )
     .await;
 
-    let status_rx = client.get_status_receiver().await;
+    let status_rx = client.get_status_receiver().await.expect("status receiver");
     std::mem::forget(client);
 
     (server_sender, status_rx, db)
@@ -562,7 +562,7 @@ async fn test_external_no_false_disconnect_when_never_connected() {
     )
     .await;
 
-    let mut status_rx = client.get_status_receiver().await;
+    let mut status_rx = client.get_status_receiver().await.expect("status receiver");
     std::mem::forget(client);
 
     // With the zero guard, checker should NOT fire Disconnected

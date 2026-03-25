@@ -120,21 +120,16 @@ impl ClientSenders {
 
     /// Retrieves the message receiver channel.
     ///
-    /// This method can only be called once per instance as it consumes the receiver.
+    /// Returns `None` if the receiver has already been taken by a previous call.
     ///
     /// # Returns
     ///
-    /// The message receiver channel
-    ///
-    /// # Panics
-    ///
-    /// Panics if the receiver has already been taken
-    pub fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
+    /// `Some(Receiver)` on the first call, `None` on subsequent calls
+    pub fn get_handle_message_receiver(&self) -> Option<Receiver<(Vec<u8>, String)>> {
         self.handle_message_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take()
-            .expect("Receiver already taken")
     }
 
     /// Sets the server options. Thread-safe via internal RwLock.
@@ -164,14 +159,23 @@ impl ClientSenders {
     pub fn send_handle_message(&self, data: Vec<u8>, peer: &str) {
         self.metrics.inc_messages_received();
 
+        // Single lock guard for both drain and send (reduces lock contention)
+        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
+
         // Step 1: drain any previously buffered messages first (ordering)
-        self.drain_spillover();
+        while let Some(item) = spillover.front().cloned() {
+            match self.handle_message_sx.try_send(item) {
+                Ok(()) => {
+                    spillover.pop_front();
+                }
+                Err(_) => break,
+            }
+        }
 
         // Step 2: attempt direct send or buffer
-        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
         if spillover.is_empty() {
             match self.handle_message_sx.try_send((data, peer.to_owned())) {
-                Ok(()) => return,
+                Ok(()) => (),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
                     if spillover.len() < self.spillover_buffer_size {
                         spillover.push_back(item);
@@ -193,19 +197,6 @@ impl ClientSenders {
         }
     }
 
-    /// Drains buffered spillover messages into the handler channel.
-    fn drain_spillover(&self) {
-        let mut spillover = self.spillover.lock().unwrap_or_else(|e| e.into_inner());
-        while let Some(item) = spillover.front().cloned() {
-            match self.handle_message_sx.try_send(item) {
-                Ok(()) => {
-                    spillover.pop_front();
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
     /// Checks for client timeouts and removes inactive clients.
     ///
     /// Clients that haven't sent a message within 30 seconds of the current time
@@ -221,18 +212,13 @@ impl ClientSenders {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .client_timeout_seconds as i64;
-        let keys_to_remove: Vec<String> = self
-            .clients
-            .iter()
-            .filter(|entry| entry.send_time + timeout < now)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in &keys_to_remove {
-            if self.clients.remove(key).is_some() {
+        self.clients.retain(|_, client| {
+            let keep = client.send_time + timeout >= now;
+            if !keep {
                 self.metrics.dec_connections_active();
             }
-        }
+            keep
+        });
     }
 
     /// Removes a client from the DashMap.
@@ -390,7 +376,7 @@ pub trait ClientSendersTrait {
     async fn add(&self, peer: &str, sx: Sender<Message>);
 
     /// Gets the message receiver channel.
-    async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)>;
+    async fn get_handle_message_receiver(&self) -> Option<Receiver<(Vec<u8>, String)>>;
 
     /// Sends a message to the application message handler.
     #[cfg(feature = "bebop")]
@@ -430,13 +416,13 @@ impl ClientSendersTrait for RwClientSenders {
         (**self).add(peer, sx).await;
     }
 
-    async fn get_handle_message_receiver(&self) -> Receiver<(Vec<u8>, String)> {
+    async fn get_handle_message_receiver(&self) -> Option<Receiver<(Vec<u8>, String)>> {
         (**self).get_handle_message_receiver()
     }
 
     #[cfg(feature = "bebop")]
     async fn send_handle_message(&self, data: Data<'_>, peer: &str) {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(256);
         if let Err(e) = data.serialize(&mut buf) {
             log_error!("Failed to serialize data: {:?}", e);
             return;
@@ -479,25 +465,31 @@ impl ClientSendersTrait for RwClientSenders {
         use std::collections::HashSet;
         let target_peers: HashSet<&String> = peer_list.iter().collect();
         let peers = (**self).peers_in(&target_peers);
-        for peer in peers {
-            self.send(&peer, message.clone()).await;
-        }
+        let futures: Vec<_> = peers
+            .iter()
+            .map(|peer| self.send(peer, message.clone()))
+            .collect();
+        futures_util::future::join_all(futures).await;
     }
 
     async fn send_all(&self, message: Message) {
         let all_peers = (**self).peers();
-        for peer in all_peers {
-            self.send(&peer, message.clone()).await;
-        }
+        let futures: Vec<_> = all_peers
+            .iter()
+            .map(|peer| self.send(peer, message.clone()))
+            .collect();
+        futures_util::future::join_all(futures).await;
     }
 
     async fn send_all_in_list(&self, peer_list: &[String], message: Message) {
         use std::collections::HashSet;
         let target_peers: HashSet<&String> = peer_list.iter().collect();
         let peers = (**self).peers_in(&target_peers);
-        for peer in peers {
-            self.send(&peer, message.clone()).await;
-        }
+        let futures: Vec<_> = peers
+            .iter()
+            .map(|peer| self.send(peer, message.clone()))
+            .collect();
+        futures_util::future::join_all(futures).await;
     }
 }
 
@@ -628,14 +620,18 @@ mod tests {
     #[test]
     fn test_client_senders_get_handle_message_receiver() {
         let senders = create_test_client_senders();
-        let _rx = senders.get_handle_message_receiver();
-        // Receiver should be taken successfully
+        let rx = senders.get_handle_message_receiver();
+        assert!(rx.is_some(), "First call should return Some");
+
+        // Second call should return None
+        let rx2 = senders.get_handle_message_receiver();
+        assert!(rx2.is_none(), "Second call should return None");
     }
 
     #[tokio::test]
     async fn test_client_senders_send_handle_message() {
         let senders = create_test_client_senders();
-        let mut rx = senders.get_handle_message_receiver();
+        let mut rx = senders.get_handle_message_receiver().expect("receiver");
 
         senders.send_handle_message(vec![1, 2, 3], "peer1");
 

@@ -24,7 +24,6 @@ use crate::{helpers::metrics::Metrics, log_debug, log_error, AtomicWebsocketType
 use bebop::Record;
 
 use tokio::sync::mpsc::Receiver;
-use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use super::types::{save_key, RwServerSender, DB};
@@ -275,19 +274,23 @@ impl AtomicClient {
 
     /// Gets a receiver for connection status updates.
     ///
+    /// Returns `None` if the receiver has already been taken by a previous call.
+    ///
     /// # Returns
     ///
-    /// A channel receiver for connection status events
-    pub async fn get_status_receiver(&self) -> Receiver<SenderStatus> {
+    /// `Some(Receiver)` on the first call, `None` on subsequent calls
+    pub async fn get_status_receiver(&self) -> Option<Receiver<SenderStatus>> {
         self.server_sender.get_status_receiver().await
     }
 
     /// Gets a receiver for incoming messages.
     ///
+    /// Returns `None` if the receiver has already been taken by a previous call.
+    ///
     /// # Returns
     ///
-    /// A channel receiver for incoming message data
-    pub async fn get_handle_message_receiver(&self) -> Receiver<Vec<u8>> {
+    /// `Some(Receiver)` on the first call, `None` on subsequent calls
+    pub async fn get_handle_message_receiver(&self) -> Option<Receiver<Vec<u8>>> {
         self.server_sender.get_handle_message_receiver().await
     }
 
@@ -316,11 +319,8 @@ async fn internal_ping_loop_cheker(
 ) {
     let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
-    let mut interval = tokio::time::interval_at(
-        Instant::now() + Duration::from_secs(retry_seconds),
-        Duration::from_secs(retry_seconds),
-    );
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let max_retry_seconds = retry_seconds * 8;
+    let mut current_retry_seconds = retry_seconds;
 
     loop {
         tokio::select! {
@@ -328,7 +328,7 @@ async fn internal_ping_loop_cheker(
                 log_debug!("internal_ping_loop_cheker cancelled");
                 break;
             }
-            _ = interval.tick() => {}
+            _ = tokio::time::sleep(Duration::from_secs(current_retry_seconds)) => {}
         }
         let server_sender_read = server_sender.read().await;
 
@@ -345,7 +345,7 @@ async fn internal_ping_loop_cheker(
                 server_sender.remove_ip_if_valid_server_ip("").await;
             }
 
-            // Attempt reconnection
+            // Attempt reconnection with exponential backoff
             server_sender.send_status(SenderStatus::Reconnecting).await;
             let (metrics, db) = {
                 let guard = server_sender.read().await;
@@ -355,9 +355,13 @@ async fn internal_ping_loop_cheker(
             let server_sender = server_sender.clone();
             let options = options.clone();
             tokio::spawn(async move {
-                let _ = get_internal_connect(None, db, server_sender, options).await;
-                true
+                if let Err(e) = get_internal_connect(None, db, server_sender, options).await {
+                    log_error!("Internal reconnection failed: {:?}", e);
+                }
             });
+
+            // Exponential backoff: double the retry interval (capped at 8x base)
+            current_retry_seconds = (current_retry_seconds * 2).min(max_retry_seconds);
         }
         // Send a ping if no messages for 2x retry period
         else if server_sender_read.server_received_times > 0
@@ -371,6 +375,9 @@ async fn internal_ping_loop_cheker(
                 let id: String = get_id(db).await;
                 server_sender.send(make_ping_message(&id)).await;
             }
+        } else {
+            // Connection is alive — reset reconnection backoff
+            current_retry_seconds = retry_seconds;
         }
         log_debug!("loop server checker finish");
     }
@@ -392,11 +399,8 @@ async fn outer_ping_loop_cheker(
 ) {
     let retry_seconds = options.retry_seconds.max(1);
     let use_keep_ip = options.use_keep_ip;
-    let mut interval = tokio::time::interval_at(
-        Instant::now() + Duration::from_secs(retry_seconds),
-        Duration::from_secs(retry_seconds),
-    );
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let max_retry_seconds = retry_seconds * 8;
+    let mut current_retry_seconds = retry_seconds;
 
     loop {
         tokio::select! {
@@ -404,7 +408,7 @@ async fn outer_ping_loop_cheker(
                 log_debug!("outer_ping_loop_cheker cancelled");
                 break;
             }
-            _ = interval.tick() => {}
+            _ = tokio::time::sleep(Duration::from_secs(current_retry_seconds)) => {}
         }
         let server_sender_read = server_sender.read().await;
 
@@ -420,7 +424,7 @@ async fn outer_ping_loop_cheker(
                 server_sender.remove_ip().await;
             }
 
-            // Attempt reconnection
+            // Attempt reconnection with exponential backoff
             server_sender.send_status(SenderStatus::Reconnecting).await;
             let (metrics, db) = {
                 let guard = server_sender.read().await;
@@ -430,9 +434,13 @@ async fn outer_ping_loop_cheker(
             let server_sender = server_sender.clone();
             let options = options.clone();
             tokio::spawn(async move {
-                let _ = get_outer_connect(db, server_sender, options).await;
-                true
+                if let Err(e) = get_outer_connect(db, server_sender, options).await {
+                    log_error!("External reconnection failed: {:?}", e);
+                }
             });
+
+            // Exponential backoff: double the retry interval (capped at 8x base)
+            current_retry_seconds = (current_retry_seconds * 2).min(max_retry_seconds);
         }
         // Send a ping if no messages for 2x retry period
         else if server_sender_read.server_received_times > 0
@@ -452,6 +460,9 @@ async fn outer_ping_loop_cheker(
                 let id: String = get_id(db).await;
                 server_sender.send(make_ping_message(&id)).await;
             }
+        } else {
+            // Connection is alive — reset reconnection backoff
+            current_retry_seconds = retry_seconds;
         }
         log_debug!("loop server checker finish");
     }
