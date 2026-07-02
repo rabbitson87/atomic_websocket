@@ -122,6 +122,12 @@ pub mod schema {
     pub use crate::generated::schema::*;
 }
 
+/// Module providing LAN server discovery (used by Android clients to
+/// locate the POS before the first connect).
+pub mod scan_manager {
+    pub use crate::helpers::scan_manager::*;
+}
+
 /// Module providing functionality for managing client connections on the server side.
 pub mod client_sender {
     pub use crate::helpers::client_sender::*;

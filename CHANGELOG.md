@@ -1,5 +1,9 @@
 # Changes
 
+## 0.8.2
+
+* Expose `scan_manager` (`ScanManager`) publicly again. 0.8.1 made `helpers` private, which removed `atomic_websocket::scan_manager::ScanManager` from the public API; Android clients pre-scan the LAN for the POS with it before the first connect. Additive re-export, no behavior change.
+
 ## 0.8.1
 
 * Improve low-spec stability and make server discovery explicit for fixed-IP deployments.
