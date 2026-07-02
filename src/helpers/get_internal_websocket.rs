@@ -391,16 +391,22 @@ pub async fn handle_websocket(
 /// The client identifier as a string, or empty string if not found
 #[cfg(feature = "native-db")]
 pub async fn get_id(db: DB) -> String {
-    let db = db.lock().await;
-    let Ok(reader) = db.r_transaction() else {
-        return String::new();
-    };
+    // Run the synchronous redb read on the blocking pool so it never stalls a
+    // Tokio worker thread (see `common::flatten_join` for the rationale).
+    tokio::task::spawn_blocking(move || {
+        let db = db.blocking_lock();
+        let Ok(reader) = db.r_transaction() else {
+            return String::new();
+        };
 
-    let Ok(Some(data)) = reader.get().primary::<Settings>(save_key::CLIENT_ID) else {
-        return String::new();
-    };
+        let Ok(Some(data)) = reader.get().primary::<Settings>(save_key::CLIENT_ID) else {
+            return String::new();
+        };
 
-    String::from_utf8(data.value).unwrap_or_default()
+        String::from_utf8(data.value).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Retrieves the client identifier from in-memory storage.

@@ -49,9 +49,9 @@ async fn server_start(address: String) {
     )
     .await
     .unwrap();
-    let handle_message_receiver = atomic_server.get_handle_message_receiver().await;
-
-    tokio::spawn(receive_server_handle_message(handle_message_receiver));
+    if let Some(handle_message_receiver) = atomic_server.get_handle_message_receiver().await {
+        tokio::spawn(receive_server_handle_message(handle_message_receiver));
+    }
 }
 
 pub async fn receive_server_handle_message(mut receiver: Receiver<(Vec<u8>, String)>) {

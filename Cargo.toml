@@ -1,6 +1,6 @@
 [package]
 name = "atomic_websocket"
-version = "0.8.0"
+version = "0.8.1"
 authors = ["hsng95@gmail.com"]
 description = "High level Websocket util library from tokio-tungstenite"
 homepage = "https://github.com/rabbitson87/atomic_websocket"
@@ -11,7 +11,7 @@ edition = "2021"
 rust-version = "1.77"
 
 [dependencies]
-tokio = { version = "1.50.0", default-features = false, features = [
+tokio = { version = "1.52.3", default-features = false, features = [
     "sync",
     "macros",
     "time",
@@ -21,24 +21,26 @@ async-trait = "0.1.89"
 native_db = { version = "0.8.2", optional = true }
 native_model = { version = "0.4.20", optional = true }
 tokio-tungstenite = "0.29.0"
-nanoid = "0.4.0"
+nanoid = "0.5.0"
 futures-util = "0.3.32"
 thiserror = "2.0.18"
 
 bebop = { version = "3.2.3", optional = true }
-dashmap = "6.1"
-chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+dashmap = "6.2.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 serde = { version = "1.0.228", features = ["derive"] }
 
-rustls = { version = "0.23.37", features = [
+rustls = { version = "0.23.41", features = [
     "ring",
 ], default-features = false, optional = true }
 tokio-rustls = { version = "0.26.4", default-features = false, optional = true }
-rustls-pemfile = { version = "2.2.0", optional = true }
-webpki-roots = { version = "1.0.6", optional = true }
+# PEM parsing lives in rustls-pki-types (rustls re-exports it as `rustls::pki_types`).
+# Replaces the unmaintained/archived `rustls-pemfile` (RUSTSEC-2025-0134).
+rustls-pki-types = { version = "1", features = ["std"], optional = true }
+webpki-roots = { version = "1.0.8", optional = true }
 rinf = { version = "8.10.0", optional = true }
-log = { version = "0.4.29", optional = true }
+log = { version = "0.4.33", optional = true }
 
 [workspace]
 members = ["make_bebop", "test_server", "test_client"]
@@ -51,7 +53,7 @@ debug = ["dep:log"]
 rustls = [
     "dep:rustls",
     "dep:tokio-rustls",
-    "dep:rustls-pemfile",
+    "dep:rustls-pki-types",
     "tokio-tungstenite/__rustls-tls",
     "dep:webpki-roots",
 ]

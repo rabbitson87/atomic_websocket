@@ -134,6 +134,22 @@ impl ClientOptionsBuilder {
         self
     }
 
+    /// Enables or disables automatic local-subnet scanning when no server IP is
+    /// known (default: `false`).
+    ///
+    /// Leave off for fixed-IP deployments; trigger discovery explicitly with
+    /// [`crate::server_sender`]'s client `scan_and_connect` instead.
+    pub fn use_scan_discovery(mut self, use_scan_discovery: bool) -> Self {
+        self.options.use_scan_discovery = use_scan_discovery;
+        self
+    }
+
+    /// Sets the maximum duration in seconds for an explicit scan (default: 60).
+    pub fn scan_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.options.scan_timeout_seconds = seconds;
+        self
+    }
+
     /// Builds and returns the configured [`ClientOptions`].
     pub fn build(self) -> ClientOptions {
         self.options
@@ -248,22 +264,27 @@ impl ServerOptionsBuilder {
     /// `Ok(Self)` on success, or an `io::Error` if loading/parsing fails
     #[cfg(feature = "rustls")]
     pub fn tls_from_pem(mut self, cert_path: &str, key_path: &str) -> std::io::Result<Self> {
-        use std::io::{BufReader, ErrorKind};
+        // PEM parsing via rustls-pki-types (re-exported by rustls). This replaces
+        // the unmaintained `rustls-pemfile` (RUSTSEC-2025-0134).
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use std::io::{Error, ErrorKind};
         use std::sync::Arc;
 
-        let cert_file = std::fs::File::open(cert_path)?;
-        let key_file = std::fs::File::open(key_path)?;
+        let certs = CertificateDer::pem_file_iter(cert_path)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
-        let certs: Vec<_> =
-            rustls_pemfile::certs(&mut BufReader::new(cert_file)).collect::<Result<_, _>>()?;
-
-        let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))?
-            .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "no private key found"))?;
+        // `from_pem_file` reads the first private key (PKCS#8/PKCS#1/SEC1) and
+        // returns `NoItemsFound` if the file has none.
+        let key = PrivateKeyDer::from_pem_file(key_path)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
         self.options.tls_config = Some(Arc::new(config));
         Ok(self)

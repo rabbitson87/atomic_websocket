@@ -70,6 +70,21 @@ pub struct ClientOptions {
     /// When the handler channel is full, messages are buffered here instead of
     /// blocking. Messages are dropped only when this buffer also reaches its cap.
     pub spillover_buffer_size: usize,
+
+    /// Whether `get_internal_connect` may auto-scan the local subnet when no
+    /// server IP is known (default: `false`).
+    ///
+    /// In fixed-IP deployments the server address is typed in (or saved) ahead
+    /// of time, so auto-discovery is off by default — when the IP is unknown the
+    /// client simply reports `Disconnected` and the application keeps running.
+    /// Discovery can still be triggered explicitly via
+    /// [`AtomicClient::scan_and_connect`] (the "search" button).
+    pub use_scan_discovery: bool,
+
+    /// Maximum time in seconds an explicit scan ([`AtomicClient::scan_and_connect`])
+    /// runs before giving up (default: 60). Prevents an endless scan when no
+    /// server is present.
+    pub scan_timeout_seconds: u64,
 }
 
 impl Default for ClientOptions {
@@ -87,6 +102,8 @@ impl Default for ClientOptions {
             status_buffer_size: 8,
             per_connection_buffer_size: 8,
             spillover_buffer_size: 1024,
+            use_scan_discovery: false,
+            scan_timeout_seconds: 60,
         }
     }
 }
@@ -151,6 +168,68 @@ impl AtomicClient {
     pub async fn disconnect(&self) {
         self.cancel_token.cancel();
         self.server_sender.remove_ip().await;
+    }
+
+    /// Explicitly scans the local network for a server — the "search" button.
+    ///
+    /// Auto-discovery is off by default (`use_scan_discovery == false`) so
+    /// fixed-IP deployments stay deterministic. Call this to run a one-off scan
+    /// when the server IP is unknown (e.g. first-time setup). On success the
+    /// connection is handed off and the discovered IP is persisted, so later
+    /// launches connect directly without scanning.
+    ///
+    /// The scan is bounded by `ClientOptions::scan_timeout_seconds` and runs the
+    /// network probing on the Tokio runtime without blocking the caller's thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `port` - The port to scan for (e.g. "9000")
+    /// * `db` - Database instance used to persist the discovered connection info
+    ///
+    /// # Returns
+    ///
+    /// `true` if a server was found and a connection was started, `false`
+    /// otherwise (timeout, already connecting, or no local network).
+    pub async fn scan_and_connect(&self, port: &str, db: DB) -> bool {
+        // Respect the same duplicate-connection guard as the normal path.
+        if !self.server_sender.is_need_connect().await {
+            return false;
+        }
+        // Already connected — nothing to do.
+        if self.server_sender.is_valid_server_ip().await {
+            self.server_sender.send_status(SenderStatus::Connected).await;
+            return true;
+        }
+        // Scanning needs the local subnet to build the candidate list.
+        if get_ip_address().is_empty() {
+            self.server_sender.send_status(SenderStatus::Disconnected).await;
+            return false;
+        }
+
+        self.server_sender.send_status(SenderStatus::Connecting).await;
+
+        let mut manager = ScanManager::new(port);
+        let scan_timeout = Duration::from_secs(self.options.scan_timeout_seconds.max(1));
+        match manager.run_with_timeout(scan_timeout).await {
+            Some((server_ip, ws_stream)) => {
+                let server_sender = self.server_sender.clone();
+                let options = self.options.clone();
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream)
+                            .await
+                    {
+                        log_error!("Error handling websocket: {:?}", error);
+                        server_sender.write().await.is_try_connect = false;
+                    }
+                });
+                true
+            }
+            None => {
+                self.server_sender.send_status(SenderStatus::Disconnected).await;
+                false
+            }
+        }
     }
 
     /// Initiates a connection to an external server.
@@ -226,37 +305,42 @@ impl AtomicClient {
     /// * `db` - Database instance
     #[cfg(feature = "native-db")]
     pub async fn regist_id(&self, db: DB) {
-        let db = db.lock().await;
-        let Ok(reader) = db.r_transaction() else {
-            log_error!("Failed to create r_transaction for regist_id");
-            return;
-        };
-        let data = match reader.get().primary::<Settings>(save_key::CLIENT_ID) {
-            Ok(data) => data,
-            Err(e) => {
-                log_error!("Failed to get ClientId: {:?}", e);
-                return;
-            }
-        };
-        drop(reader);
-
-        if data.is_none() {
-            use nanoid::nanoid;
-            let Ok(writer) = db.rw_transaction() else {
-                log_error!("Failed to create rw_transaction for regist_id");
+        // Run the synchronous redb work (including the fsync on commit) on the
+        // blocking pool so it never stalls a Tokio worker thread.
+        let _ = tokio::task::spawn_blocking(move || {
+            let db = db.blocking_lock();
+            let Ok(reader) = db.r_transaction() else {
+                log_error!("Failed to create r_transaction for regist_id");
                 return;
             };
-            if let Err(e) = writer.insert::<Settings>(Settings {
-                key: save_key::CLIENT_ID.to_owned(),
-                value: nanoid!().as_bytes().to_vec(),
-            }) {
-                log_error!("Failed to insert ClientId: {:?}", e);
-                return;
+            let data = match reader.get().primary::<Settings>(save_key::CLIENT_ID) {
+                Ok(data) => data,
+                Err(e) => {
+                    log_error!("Failed to get ClientId: {:?}", e);
+                    return;
+                }
+            };
+            drop(reader);
+
+            if data.is_none() {
+                use nanoid::nanoid;
+                let Ok(writer) = db.rw_transaction() else {
+                    log_error!("Failed to create rw_transaction for regist_id");
+                    return;
+                };
+                if let Err(e) = writer.insert::<Settings>(Settings {
+                    key: save_key::CLIENT_ID.to_owned(),
+                    value: nanoid!().as_bytes().to_vec(),
+                }) {
+                    log_error!("Failed to insert ClientId: {:?}", e);
+                    return;
+                }
+                if let Err(e) = writer.commit() {
+                    log_error!("Failed to commit ClientId: {:?}", e);
+                }
             }
-            if let Err(e) = writer.commit() {
-                log_error!("Failed to commit ClientId: {:?}", e);
-            }
-        }
+        })
+        .await;
     }
 
     /// Registers a unique client ID in memory if one doesn't exist.
@@ -547,22 +631,36 @@ pub async fn get_internal_connect(
         get_setting_by_key(db.clone(), save_key::SERVER_CONNECT_INFO.to_owned()).await?;
     log_debug!("server_connect_info: {:?}", server_connect_info);
 
-    // Store connection info in database if provided and not already present
+    // Store connection info in database if provided and not already present.
+    // Runs on the blocking pool so the commit's fsync never stalls a worker thread.
     if let (Some(input_ref), None) = (input.as_ref(), server_connect_info.as_ref()) {
-        let db_clone = db.lock().await;
-        let writer = db_clone.rw_transaction()?;
-        let mut value = Vec::new();
-        ServerConnectInfo {
-            server_ip: "",
-            port: input_ref.port,
+        let port = input_ref.port.to_string();
+        let db_clone = db.clone();
+        let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let db = db_clone.blocking_lock();
+            let writer = db.rw_transaction().map_err(|e| e.to_string())?;
+            let mut value = Vec::new();
+            ServerConnectInfo {
+                server_ip: "",
+                port: &port,
+            }
+            .serialize(&mut value)
+            .map_err(|e| e.to_string())?;
+            writer
+                .insert::<Settings>(Settings {
+                    key: save_key::SERVER_CONNECT_INFO.to_owned(),
+                    value,
+                })
+                .map_err(|e| e.to_string())?;
+            writer.commit().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await;
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e.into()),
+            Err(e) => return Err(e.to_string().into()),
         }
-        .serialize(&mut value)?;
-        writer.insert::<Settings>(Settings {
-            key: save_key::SERVER_CONNECT_INFO.to_owned(),
-            value,
-        })?;
-        writer.commit()?;
-        drop(db_clone);
     }
 
     // Cannot connect if no input or stored connection info
@@ -601,20 +699,26 @@ pub async fn get_internal_connect(
         }
     };
 
-    // Get local IP address for connection
-    let ip = get_ip_address();
-
-    // Cannot connect without local IP
-    if ip.is_empty() {
-        server_sender.send_status(SenderStatus::Disconnected).await;
-        return Ok(());
-    }
-
-    // Connect directly to known server IP or use discovery
-    server_sender.send_status(SenderStatus::Connecting).await;
+    // Connect directly to known server IP or, only if explicitly enabled, scan.
     match connect_info_data.server_ip {
-        // Empty server IP means use local network discovery
+        // No known server IP. In fixed-IP deployments the address is typed in,
+        // so we do NOT auto-scan unless `use_scan_discovery` is enabled. The app
+        // keeps running and the user can enter the IP or press "search"
+        // (`scan_and_connect`).
         "" => {
+            if !options.use_scan_discovery {
+                server_sender.send_status(SenderStatus::Disconnected).await;
+                return Ok(());
+            }
+
+            // Auto-scan path: needs the local subnet, so the local IP must be
+            // resolvable. This is the only branch that depends on `get_ip_address`.
+            if get_ip_address().is_empty() {
+                server_sender.send_status(SenderStatus::Disconnected).await;
+                return Ok(());
+            }
+
+            server_sender.send_status(SenderStatus::Connecting).await;
             let (server_ip, ws_stream) = ScanManager::new(connect_info_data.port).run().await;
             tokio::spawn(async move {
                 if let Err(error) =
@@ -625,8 +729,10 @@ pub async fn get_internal_connect(
                 }
             });
         }
-        // Connect to known server IP
+        // Direct connect to the known fixed server IP. No local-IP / internet
+        // dependency — works on an isolated LAN with no route to the outside.
         _server_ip => {
+            server_sender.send_status(SenderStatus::Connecting).await;
             tokio::spawn(wrap_get_internal_websocket(
                 db.clone(),
                 server_sender.clone(),
@@ -658,11 +764,14 @@ pub async fn get_internal_connect(
         return Ok(());
     }
 
-    // Get local IP address for connection
-    let ip = get_ip_address();
+    // Local network discovery is opt-in (off by default for fixed-IP setups).
+    if !options.use_scan_discovery {
+        server_sender.send_status(SenderStatus::Disconnected).await;
+        return Ok(());
+    }
 
-    // Cannot connect without local IP
-    if ip.is_empty() {
+    // Cannot scan without knowing the local subnet.
+    if get_ip_address().is_empty() {
         server_sender.send_status(SenderStatus::Disconnected).await;
         return Ok(());
     }

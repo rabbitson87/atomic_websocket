@@ -217,6 +217,33 @@ impl ScanManager {
             self.scan_network().await;
         }
     }
+
+    /// Runs the scanning process until a server is found or the timeout elapses.
+    ///
+    /// Use this for an explicit, user-triggered "search" so the scan cannot run
+    /// forever when no server is present on the network.
+    ///
+    /// # Arguments
+    ///
+    /// * `max` - Maximum time to scan before giving up
+    ///
+    /// # Returns
+    ///
+    /// `Some((server_ip, ws_stream))` if a server was found within the timeout,
+    /// `None` otherwise.
+    pub async fn run_with_timeout(
+        &mut self,
+        max: Duration,
+    ) -> Option<(String, WebSocketStream<MaybeTlsStream<TcpStream>>)> {
+        // Signal in-flight scan tasks to stop once the deadline passes.
+        match timeout(max, self.run()).await {
+            Ok(result) => Some(result),
+            Err(_) => {
+                self.stop_flag.store(true, Ordering::Release);
+                None
+            }
+        }
+    }
 }
 
 /// Attempts to establish a WebSocket connection to a specific IP address.

@@ -1,5 +1,15 @@
 # Changes
 
+## 0.8.1
+
+* Improve low-spec stability and make server discovery explicit for fixed-IP deployments.
+  * Run every native-db (redb) transaction on a blocking thread via `spawn_blocking`, so the synchronous `commit()` `fsync` never stalls a Tokio worker thread. On slow disks this previously drifted the ping loop timing and caused false disconnections / reconnection storms. The public `DB` type is unchanged (uses `blocking_lock()` internally).
+  * Connect directly to a known fixed server IP without depending on `get_ip_address()` / internet reachability — works on isolated LANs with no route to the outside. The local IP is now resolved only on the scan path.
+  * **Behavior change:** local subnet auto-scan is now opt-in. Added `ClientOptions::use_scan_discovery` (default `false`); when the server IP is unknown the client reports `Disconnected` and the app keeps running instead of scanning. Trigger discovery explicitly with the new `AtomicClient::scan_and_connect()` ("search" button), bounded by `ClientOptions::scan_timeout_seconds` (default 60). Added `ScanManager::run_with_timeout()` and matching builder setters.
+  * `test_client` now takes `<server_ip> <port> <client_id>` arguments and persists them to the database, and starts even when the server is unreachable. Fixed pre-existing compile errors in `test_client`/`test_server`.
+  * Replaced the unmaintained/archived `rustls-pemfile` (RUSTSEC-2025-0134) with the PEM parsing in `rustls-pki-types` (re-exported by `rustls`), removing a dependency. Only affects the `rustls` feature.
+  * Added stress/regression tests for runtime blocking (`tests/stress_blocking_test.rs`) and fixed-IP behavior (`tests/fixed_ip_test.rs`).
+
 ## 0.8.0
 
 * Improve performance, connection stability and WebSocket upgrade with safer APIs.

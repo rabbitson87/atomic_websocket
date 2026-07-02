@@ -124,13 +124,10 @@ mod rustls_tests {
     #[test]
     fn test_client_options_tls_disabled() {
         let options = ClientOptions {
-            use_ping: true,
             url: "example.com".to_string(),
-            retry_seconds: 30,
-            use_keep_ip: false,
-            connect_timeout_seconds: 3,
             atomic_websocket_type: AtomicWebsocketType::External,
             use_tls: false,
+            ..Default::default()
         };
 
         assert!(!options.use_tls);

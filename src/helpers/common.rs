@@ -64,12 +64,37 @@ macro_rules! log_error {
     };
 }
 
+/// Flattens a `spawn_blocking` join result (a possible `JoinError` wrapping an
+/// inner `String` error) into the `Box<dyn Error>` used by the database helpers.
+///
+/// All native-db (redb) work is synchronous and performs disk I/O — most notably
+/// `commit()` issues an `fsync`. Running that directly on a Tokio worker thread
+/// stalls the async runtime on slow disks (low-spec machines), which drifts the
+/// ping loop timing and causes false disconnections. We therefore run every DB
+/// transaction inside `spawn_blocking` so the fsync never blocks a worker thread.
+#[cfg(feature = "native-db")]
+fn flatten_join<T>(
+    res: Result<Result<T, String>, tokio::task::JoinError>,
+) -> Result<T, Box<dyn Error>> {
+    match res {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(<Box<dyn Error>>::from(e)),
+        Err(e) => Err(<Box<dyn Error>>::from(e.to_string())),
+    }
+}
+
 #[cfg(feature = "native-db")]
 pub async fn get_setting_by_key(db: DB, key: String) -> Result<Option<Settings>, Box<dyn Error>> {
-    let db = db.lock().await;
-    let reader = db.r_transaction()?;
-
-    Ok(reader.get().primary::<Settings>(key)?)
+    let res = tokio::task::spawn_blocking(move || -> Result<Option<Settings>, String> {
+        let db = db.blocking_lock();
+        let reader = db.r_transaction().map_err(|e| e.to_string())?;
+        reader
+            .get()
+            .primary::<Settings>(key)
+            .map_err(|e| e.to_string())
+    })
+    .await;
+    flatten_join(res)
 }
 
 #[cfg(not(feature = "native-db"))]
@@ -83,24 +108,30 @@ pub async fn get_setting_by_key(db: DB, key: String) -> Result<Option<Settings>,
 
 #[cfg(feature = "native-db")]
 pub async fn set_setting(db: DB, settings: Settings) -> Result<bool, Box<dyn Error>> {
-    let db = db.lock().await;
-    let reader = db.r_transaction()?;
-    let writer = db.rw_transaction()?;
+    let res = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let db = db.blocking_lock();
+        let reader = db.r_transaction().map_err(|e| e.to_string())?;
+        let setting = reader
+            .get()
+            .primary::<Settings>(settings.key.clone())
+            .map_err(|e| e.to_string())?;
+        drop(reader);
 
-    let setting = reader.get().primary::<Settings>(settings.key.clone())?;
-    drop(reader);
-
-    match setting {
-        Some(setting) => {
-            writer.update::<Settings>(setting, settings)?;
+        let writer = db.rw_transaction().map_err(|e| e.to_string())?;
+        match setting {
+            Some(setting) => writer
+                .update::<Settings>(setting, settings)
+                .map_err(|e| e.to_string())?,
+            None => writer
+                .insert::<Settings>(settings)
+                .map_err(|e| e.to_string())?,
         }
-        None => {
-            writer.insert::<Settings>(settings)?;
-        }
-    }
-    writer.commit()?;
+        writer.commit().map_err(|e| e.to_string())?;
 
-    Ok(true)
+        Ok(true)
+    })
+    .await;
+    flatten_join(res)
 }
 
 #[cfg(not(feature = "native-db"))]
@@ -113,17 +144,26 @@ pub async fn set_setting(db: DB, settings: Settings) -> Result<bool, Box<dyn Err
 #[cfg(feature = "native-db")]
 #[allow(dead_code)]
 pub async fn remove_setting(db: DB, key: String) -> Result<bool, Box<dyn Error>> {
-    let db = db.lock().await;
-    let reader = db.r_transaction()?;
-    let setting = reader.get().primary::<Settings>(key)?;
-    drop(reader);
+    let res = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let db = db.blocking_lock();
+        let reader = db.r_transaction().map_err(|e| e.to_string())?;
+        let setting = reader
+            .get()
+            .primary::<Settings>(key)
+            .map_err(|e| e.to_string())?;
+        drop(reader);
 
-    if let Some(setting) = setting {
-        let writer = db.rw_transaction()?;
-        writer.remove::<Settings>(setting)?;
-        writer.commit()?;
-    }
-    Ok(true)
+        if let Some(setting) = setting {
+            let writer = db.rw_transaction().map_err(|e| e.to_string())?;
+            writer
+                .remove::<Settings>(setting)
+                .map_err(|e| e.to_string())?;
+            writer.commit().map_err(|e| e.to_string())?;
+        }
+        Ok(true)
+    })
+    .await;
+    flatten_join(res)
 }
 
 #[cfg(not(feature = "native-db"))]
