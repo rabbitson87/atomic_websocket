@@ -200,8 +200,17 @@ impl AtomicClient {
             self.server_sender.send_status(SenderStatus::Connected).await;
             return true;
         }
+        // Single-flight: don't stack a second scan on top of an in-progress one.
+        {
+            let mut guard = self.server_sender.write().await;
+            if guard.is_scanning {
+                return false;
+            }
+            guard.is_scanning = true;
+        }
         // Scanning needs the local subnet to build the candidate list.
         if get_ip_address().is_empty() {
+            self.server_sender.write().await.is_scanning = false;
             self.server_sender.send_status(SenderStatus::Disconnected).await;
             return false;
         }
@@ -210,7 +219,11 @@ impl AtomicClient {
 
         let mut manager = ScanManager::new(port);
         let scan_timeout = Duration::from_secs(self.options.scan_timeout_seconds.max(1));
-        match manager.run_with_timeout(scan_timeout).await {
+        let found = manager.run_with_timeout(scan_timeout).await;
+
+        self.server_sender.write().await.is_scanning = false;
+
+        match found {
             Some((server_ip, ws_stream)) => {
                 let server_sender = self.server_sender.clone();
                 let options = self.options.clone();
@@ -711,23 +724,60 @@ pub async fn get_internal_connect(
                 return Ok(());
             }
 
+            // Single-flight: never run more than one scan at a time. `is_try_connect`
+            // can't guard this — it only becomes true once a connection is
+            // established — so repeated calls would each start another unbounded
+            // scan and leak a subnet's worth of in-flight sockets (port exhaustion).
+            {
+                let mut guard = server_sender.write().await;
+                if guard.is_scanning {
+                    return Ok(());
+                }
+                guard.is_scanning = true;
+            }
+
             // Auto-scan path: needs the local subnet, so the local IP must be
             // resolvable. This is the only branch that depends on `get_ip_address`.
             if get_ip_address().is_empty() {
+                server_sender.write().await.is_scanning = false;
                 server_sender.send_status(SenderStatus::Disconnected).await;
                 return Ok(());
             }
 
             server_sender.send_status(SenderStatus::Connecting).await;
-            let (server_ip, ws_stream) = ScanManager::new(connect_info_data.port).run().await;
-            tokio::spawn(async move {
-                if let Err(error) =
-                    handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream).await
-                {
-                    log_error!("Error handling websocket: {:?}", error);
-                    server_sender.write().await.is_try_connect = false;
+
+            // Bounded scan — must not run forever when no server is present.
+            let scan_timeout = Duration::from_secs(options.scan_timeout_seconds.max(1));
+            let found = ScanManager::new(connect_info_data.port)
+                .run_with_timeout(scan_timeout)
+                .await;
+
+            // Scan finished (found or timed out) — release the single-flight guard.
+            server_sender.write().await.is_scanning = false;
+
+            match found {
+                Some((server_ip, ws_stream)) => {
+                    tokio::spawn(async move {
+                        if let Err(error) = handle_websocket(
+                            db,
+                            server_sender.clone(),
+                            options,
+                            server_ip,
+                            ws_stream,
+                        )
+                        .await
+                        {
+                            log_error!("Error handling websocket: {:?}", error);
+                            server_sender.write().await.is_try_connect = false;
+                        }
+                    });
                 }
-            });
+                None => {
+                    // Timed out with no server — hand control back to the caller's
+                    // retry loop instead of holding sockets open.
+                    server_sender.send_status(SenderStatus::Disconnected).await;
+                }
+            }
         }
         // Direct connect to the known fixed server IP. No local-IP / internet
         // dependency — works on an isolated LAN with no route to the outside.
@@ -770,23 +820,44 @@ pub async fn get_internal_connect(
         return Ok(());
     }
 
+    // Single-flight guard so repeated calls never stack concurrent scans.
+    {
+        let mut guard = server_sender.write().await;
+        if guard.is_scanning {
+            return Ok(());
+        }
+        guard.is_scanning = true;
+    }
+
     // Cannot scan without knowing the local subnet.
     if get_ip_address().is_empty() {
+        server_sender.write().await.is_scanning = false;
         server_sender.send_status(SenderStatus::Disconnected).await;
         return Ok(());
     }
 
-    // Use local network discovery
+    // Use local network discovery, bounded so it cannot run forever.
     server_sender.send_status(SenderStatus::Connecting).await;
-    let (server_ip, ws_stream) = ScanManager::new("9000").run().await;
-    tokio::spawn(async move {
-        if let Err(error) =
-            handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream).await
-        {
-            log_error!("Error handling websocket: {:?}", error);
-            server_sender.write().await.is_try_connect = false;
+    let scan_timeout = Duration::from_secs(options.scan_timeout_seconds.max(1));
+    let found = ScanManager::new("9000").run_with_timeout(scan_timeout).await;
+
+    server_sender.write().await.is_scanning = false;
+
+    match found {
+        Some((server_ip, ws_stream)) => {
+            tokio::spawn(async move {
+                if let Err(error) =
+                    handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream).await
+                {
+                    log_error!("Error handling websocket: {:?}", error);
+                    server_sender.write().await.is_try_connect = false;
+                }
+            });
         }
-    });
+        None => {
+            server_sender.send_status(SenderStatus::Disconnected).await;
+        }
+    }
 
     Ok(())
 }

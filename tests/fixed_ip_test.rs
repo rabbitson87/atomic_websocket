@@ -140,3 +140,55 @@ async fn direct_fixed_ip_connects() {
 
     server.shutdown().await;
 }
+
+/// Regression: the scan-discovery path must be single-flight.
+///
+/// Before this guard, `is_try_connect` only became true once a connection was
+/// established, so while `ScanManager` was still searching (forever, when no
+/// server exists) every repeated `get_internal_connect` call passed the
+/// re-entrancy guard and started ANOTHER unbounded scan. Each scan held a
+/// subnet's worth of in-flight sockets, so a retry/registration loop leaked
+/// SYN_SENT sockets until the machine's ephemeral ports were exhausted.
+///
+/// This asserts the flag-level invariant without touching the network: while a
+/// scan is already in progress (`is_scanning == true`), a second call returns
+/// immediately instead of entering the scan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scan_discovery_is_single_flight() {
+    let (_temp, db) = make_native_db();
+    let mut options = ClientOptions::default();
+    options.use_scan_discovery = true;
+    // Long timeout: if the guard failed to engage, the call would enter the scan
+    // and block far beyond the 3s assertion window below.
+    options.scan_timeout_seconds = 60;
+    let ss = make_server_sender(db.clone(), options.clone()).await;
+
+    // Simulate a scan already in progress.
+    ss.write().await.is_scanning = true;
+
+    let port = "16250".to_string();
+    let call = get_internal_connect(
+        Some(ServerConnectInfo {
+            server_ip: "",
+            port: &port,
+        }),
+        db.clone(),
+        ss.clone(),
+        options.clone(),
+    );
+
+    // With single-flight the call returns immediately; without it, it would start
+    // a second scan and block until the 60s timeout.
+    let res = tokio::time::timeout(Duration::from_secs(3), call).await;
+    assert!(
+        res.is_ok(),
+        "get_internal_connect started a second concurrent scan instead of single-flighting"
+    );
+    res.unwrap().expect("get_internal_connect returned Err");
+
+    // The guard must not clear another scan's in-progress flag.
+    assert!(
+        ss.read().await.is_scanning,
+        "single-flight guard wrongly cleared the in-progress scan flag"
+    );
+}

@@ -109,6 +109,15 @@ pub struct ServerSender {
     pub options: ClientOptions,
     /// Whether a connection attempt is currently in progress
     pub is_try_connect: bool,
+    /// Whether a local-network scan is currently in progress.
+    ///
+    /// Single-flight guard for discovery: `is_try_connect` only becomes true once
+    /// `handle_websocket` starts (after a connection is established), so it cannot
+    /// prevent overlapping scans while `ScanManager` is still searching. Without a
+    /// dedicated flag, every repeated `get_internal_connect`/`scan_and_connect`
+    /// call would start another scan, each holding a subnet's worth of in-flight
+    /// sockets and exhausting ephemeral ports.
+    pub is_scanning: bool,
     /// Metrics counters for observability
     pub metrics: Arc<Metrics>,
     /// Spillover buffer: stores messages when handler channel is full (non-blocking)
@@ -143,6 +152,7 @@ impl ServerSender {
             handle_message_rx: Some(handle_message_rx),
             options,
             is_try_connect: false,
+            is_scanning: false,
             metrics: Arc::new(Metrics::new()),
             spillover: std::sync::Mutex::new(VecDeque::new()),
         }

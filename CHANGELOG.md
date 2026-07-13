@@ -1,5 +1,12 @@
 # Changes
 
+## 0.8.3
+
+* Fix unbounded socket accumulation in the scan-discovery path (could exhaust the machine's ephemeral ports).
+  * Single-flight the scan via a new `is_scanning` guard. Previously `is_try_connect` only became true once a connection was established, so while `ScanManager` was still searching (forever, when no server exists) every repeated `get_internal_connect` / `scan_and_connect` call started another concurrent scan — each holding a subnet's worth of in-flight sockets.
+  * Bound the discovery scan with `run_with_timeout(scan_timeout_seconds)` instead of the unbounded `run()`; on timeout the client reports `Disconnected` so the caller's retry loop stays in charge.
+  * Added a single-flight regression test.
+
 ## 0.8.2
 
 * Expose `scan_manager` (`ScanManager`) publicly again. 0.8.1 made `helpers` private, which removed `atomic_websocket::scan_manager::ScanManager` from the public API; Android clients pre-scan the LAN for the POS with it before the first connect. Additive re-export, no behavior change.
