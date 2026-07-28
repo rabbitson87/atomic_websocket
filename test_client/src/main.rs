@@ -8,6 +8,7 @@ use std::{
 
 use atomic_websocket::{
     common::{get_id, make_response_message, set_setting},
+    connection_store::{ConnectionStore, NativeDbConnectionStore},
     external::native_db::{Builder, Models},
     schema::{AppStartup, AppStartupOutput, Category, Data, ServerConnectInfo},
     server_sender::{ClientOptions, SenderStatus, ServerSender, ServerSenderTrait},
@@ -109,7 +110,8 @@ async fn save_client_config(server_ip: &str, port: &str, client_id: &str) {
 async fn outer_client_start() {
     let mut client_options = ClientOptions::default();
     client_options.url = "example.com/websocket".into();
-    let atomic_client = AtomicWebsocket::get_outer_client(db().clone(), client_options).await;
+    let atomic_client =
+        AtomicWebsocket::get_outer_client(connection_store().clone(), client_options).await;
 
     if let Some(status_receiver) = atomic_client.get_status_receiver().await {
         tokio::spawn(receive_status(status_receiver));
@@ -118,7 +120,7 @@ async fn outer_client_start() {
         tokio::spawn(receive_handle_message(handle_message_receiver));
     }
 
-    let _ = atomic_client.get_outer_connect(db().clone()).await;
+    let _ = atomic_client.get_outer_connect(connection_store().clone()).await;
 }
 
 async fn internal_client_start(port: String) {
@@ -126,7 +128,7 @@ async fn internal_client_start(port: String) {
     client_options.retry_seconds = 2;
     client_options.use_keep_ip = true;
     let atomic_client = AtomicWebsocket::get_internal_client_with_server_sender(
-        db().clone(),
+        connection_store().clone(),
         client_options,
         server_sender().clone(),
     )
@@ -147,7 +149,7 @@ async fn internal_client_start(port: String) {
                 server_ip: "",
                 port: &port,
             }),
-            db().clone(),
+            connection_store().clone(),
         )
         .await;
 }
@@ -240,11 +242,16 @@ pub fn db() -> &'static DB {
     })
 }
 
+pub fn connection_store() -> &'static Arc<dyn ConnectionStore> {
+    static BUILDER: OnceLock<Arc<dyn ConnectionStore>> = OnceLock::new();
+    BUILDER.get_or_init(|| Arc::new(NativeDbConnectionStore::new(db().clone())))
+}
+
 pub fn server_sender() -> &'static RwServerSender {
     static BUILDER: OnceLock<RwServerSender> = OnceLock::new();
     BUILDER.get_or_init(|| {
         Arc::new(RwLock::new(ServerSender::new(
-            db().clone(),
+            connection_store().clone(),
             "".into(),
             ClientOptions::default(),
         )))

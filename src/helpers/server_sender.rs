@@ -13,59 +13,26 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
 
 #[cfg(feature = "bebop")]
-use crate::generated::schema::{Data, ServerConnectInfo};
-#[cfg(feature = "bebop")]
-use crate::helpers::common::get_setting_by_key;
-#[cfg(not(feature = "bebop"))]
-use crate::helpers::common::remove_setting;
+use crate::generated::schema::Data;
+#[cfg(all(test, feature = "bebop"))]
+use crate::generated::schema::ServerConnectInfo;
+#[cfg(test)]
+use crate::Settings;
 use crate::{
     helpers::{
-        common::set_setting, get_internal_websocket::wrap_get_internal_websocket,
+        connection_store::ConnectionStore,
+        get_internal_websocket::wrap_get_internal_websocket,
         get_outer_websocket::wrap_get_outer_websocket, metrics::Metrics,
     },
-    log_debug, log_error, AtomicWebsocketType, Settings,
+    log_debug, log_error, AtomicWebsocketType,
 };
 
 use crate::helpers::traits::date_time::now;
 
 use super::{
-    common::make_disconnect_message,
-    internal_client::ClientOptions,
-    retry::ExponentialBackoff,
-    types::{save_key, RwServerSender, DB},
+    common::make_disconnect_message, internal_client::ClientOptions, retry::ExponentialBackoff,
+    types::RwServerSender,
 };
-
-/// Persists server connection info to the database.
-///
-/// Uses `set_setting` which handles both native-db and in-memory storage,
-/// eliminating the need for separate cfg-gated implementations.
-async fn persist_connection_info(db: DB, server_ip: &str) {
-    #[cfg(feature = "bebop")]
-    let value = {
-        let port = server_ip.split(':').nth(1).unwrap_or("");
-        let data = ServerConnectInfo { server_ip, port };
-        let mut buf = Vec::new();
-        if let Err(e) = data.serialize(&mut buf) {
-            log_error!("Failed to serialize ServerConnectInfo: {:?}", e);
-            return;
-        }
-        buf
-    };
-    #[cfg(not(feature = "bebop"))]
-    let value = server_ip.as_bytes().to_vec();
-
-    if let Err(e) = set_setting(
-        db,
-        Settings {
-            key: save_key::SERVER_CONNECT_INFO.to_owned(),
-            value,
-        },
-    )
-    .await
-    {
-        log_error!("Failed to persist connection info: {:?}", e);
-    }
-}
 
 /// Represents the current status of a server connection.
 #[derive(Clone, Debug, PartialEq)]
@@ -89,8 +56,8 @@ pub enum SenderStatus {
 pub struct ServerSender {
     /// Channel for sending messages to the server
     sx: Option<mpsc::Sender<Message>>,
-    /// Database for storing connection state
-    pub db: DB,
+    /// Persistence for connection-identity state (client ID, server connect info)
+    pub connection_store: Arc<dyn ConnectionStore>,
     /// Reference to self for recursive operations
     pub server_sender: Option<RwServerSender>,
     /// Server IP address or WebSocket URL
@@ -129,20 +96,24 @@ impl ServerSender {
     ///
     /// # Arguments
     ///
-    /// * `db` - Database for storing connection state
+    /// * `connection_store` - Persistence for connection-identity state (client ID, server connect info)
     /// * `server_ip` - Server IP address or WebSocket URL
     /// * `options` - Connection configuration options
     ///
     /// # Returns
     ///
     /// A new ServerSender instance
-    pub fn new(db: DB, server_ip: String, options: ClientOptions) -> Self {
+    pub fn new(
+        connection_store: Arc<dyn ConnectionStore>,
+        server_ip: String,
+        options: ClientOptions,
+    ) -> Self {
         let (status_tx, status_rx) = mpsc::channel(options.status_buffer_size);
         let (handle_message_tx, handle_message_rx) = mpsc::channel(options.handler_buffer_size);
 
         Self {
             sx: None,
-            db,
+            connection_store,
             server_sender: None,
             server_ip,
             server_received_times: 0,
@@ -364,16 +335,17 @@ impl ServerSenderTrait for RwServerSender {
     /// Sets a new message sender and server IP, also updating the database.
     async fn add(&self, sx: mpsc::Sender<Message>, server_ip: &str) {
         // Update in-memory state
-        let db = {
+        let connection_store = {
             let mut guard = self.write().await;
             guard.add(sx, server_ip);
-            guard.db.clone()
+            guard.connection_store.clone()
         };
 
         log_debug!("set start server_ip: {:?}", server_ip);
 
-        // Persist to database (set_setting handles upsert internally)
-        persist_connection_info(db, server_ip).await;
+        // Persist to database (set_server_connect_info handles upsert internally)
+        let port = server_ip.split(':').nth(1).unwrap_or("");
+        connection_store.set_server_connect_info(server_ip, port).await;
     }
 
     /// Gets the receiver for connection status updates.
@@ -422,7 +394,7 @@ impl ServerSenderTrait for RwServerSender {
     /// exponential backoff outside the lock to avoid blocking other operations.
     async fn send(&self, message: Message) {
         // Phase 1: Brief read lock to clone needed data
-        let (sender, status_tx, options, server_sender_ref, db, server_ip, metrics) = {
+        let (sender, status_tx, options, server_sender_ref, connection_store, server_ip, metrics) = {
             let guard = self.read().await;
             let Some(sx) = guard.sx.as_ref() else {
                 return;
@@ -432,7 +404,7 @@ impl ServerSenderTrait for RwServerSender {
                 guard.status_tx.clone(),
                 guard.options.clone(),
                 guard.server_sender.clone(),
-                guard.db.clone(),
+                guard.connection_store.clone(),
                 guard.server_ip.clone(),
                 guard.metrics.clone(),
             )
@@ -473,14 +445,18 @@ impl ServerSenderTrait for RwServerSender {
                             match options.atomic_websocket_type {
                                 AtomicWebsocketType::Internal => {
                                     tokio::spawn(wrap_get_internal_websocket(
-                                        db,
+                                        connection_store,
                                         ss.clone(),
                                         server_ip,
                                         options,
                                     ));
                                 }
                                 AtomicWebsocketType::External => {
-                                    tokio::spawn(wrap_get_outer_websocket(db, ss.clone(), options));
+                                    tokio::spawn(wrap_get_outer_websocket(
+                                        connection_store,
+                                        ss.clone(),
+                                        options,
+                                    ));
                                 }
                             }
                         }
@@ -517,91 +493,13 @@ impl ServerSenderTrait for RwServerSender {
 
     /// Removes the server IP and clears persisted connection info.
     ///
-    /// With bebop: clears the `server_ip` field in `ServerConnectInfo` and updates via `set_setting`.
-    /// Without bebop: removes the setting entirely via `remove_setting`.
-    /// Storage backend (native-db vs in-memory) is abstracted by the common helpers.
+    /// Delegates to the `ConnectionStore`, which handles both the bebop
+    /// (clear `server_ip`, keep `port`) and non-bebop (remove entirely)
+    /// storage encodings.
     async fn remove_ip_if_valid_server_ip(&self, server_ip: &str) {
-        let db = self.read().await.db.clone();
+        let connection_store = self.read().await.connection_store.clone();
         self.remove_ip().await;
-
-        #[cfg(feature = "bebop")]
-        {
-            let server_connect_info = match get_setting_by_key(
-                db.clone(),
-                save_key::SERVER_CONNECT_INFO.to_owned(),
-            )
-            .await
-            {
-                Ok(info) => info,
-                Err(error) => {
-                    log_error!("Failed to get server_connect_info {error:?}");
-                    return;
-                }
-            };
-
-            let Some(server_connect_info) = server_connect_info else {
-                return;
-            };
-
-            let Ok(mut info) = ServerConnectInfo::deserialize(&server_connect_info.value) else {
-                log_error!("Failed to deserialize ServerConnectInfo");
-                return;
-            };
-
-            // Extract IP from URL format (e.g., "ws://192.168.1.100:9000" -> "192.168.1.100")
-            let stored_ip_normalized = info
-                .server_ip
-                .trim_start_matches("ws://")
-                .trim_start_matches("wss://")
-                .split(':')
-                .next()
-                .unwrap_or(info.server_ip);
-
-            let server_ip_normalized = server_ip
-                .trim_start_matches("ws://")
-                .trim_start_matches("wss://")
-                .split(':')
-                .next()
-                .unwrap_or(server_ip);
-
-            if !stored_ip_normalized.is_empty()
-                && !server_ip_normalized.is_empty()
-                && stored_ip_normalized != server_ip_normalized
-            {
-                log_debug!(
-                    "IP mismatch: stored={}, attempted={}. Force resetting.",
-                    stored_ip_normalized,
-                    server_ip_normalized
-                );
-            }
-
-            info.server_ip = "";
-            let mut value = Vec::new();
-            if let Err(e) = info.serialize(&mut value) {
-                log_error!("Failed to serialize ServerConnectInfo: {:?}", e);
-                return;
-            }
-
-            if let Err(e) = set_setting(
-                db,
-                Settings {
-                    key: save_key::SERVER_CONNECT_INFO.to_owned(),
-                    value,
-                },
-            )
-            .await
-            {
-                log_error!("Failed to update connection info: {:?}", e);
-            }
-        }
-
-        #[cfg(not(feature = "bebop"))]
-        {
-            let _ = server_ip;
-            if let Err(e) = remove_setting(db, save_key::SERVER_CONNECT_INFO.to_owned()).await {
-                log_error!("Failed to remove connection info: {:?}", e);
-            }
-        }
+        connection_store.clear_server_ip(server_ip).await;
     }
 
     /// Updates the timestamp of the last received message.
@@ -633,6 +531,7 @@ fn get_sercer_connect_info() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::connection_store::NativeDbConnectionStore;
 
     #[cfg(not(feature = "native-db"))]
     use std::sync::Arc;
@@ -643,9 +542,15 @@ mod tests {
     #[cfg(not(feature = "native-db"))]
     use crate::helpers::types::InMemoryStorage;
 
+    /// Test helper name kept as `create_test_db` for minimal diff against the
+    /// many call sites below, but it now returns a ready-to-use
+    /// `Arc<dyn ConnectionStore>` (wrapping an in-memory `DB`) rather than a
+    /// raw `DB`, matching `ServerSender::new`'s current signature.
     #[cfg(not(feature = "native-db"))]
-    fn create_test_db() -> DB {
-        Arc::new(Mutex::new(InMemoryStorage::new()))
+    fn create_test_db() -> Arc<dyn ConnectionStore> {
+        Arc::new(NativeDbConnectionStore::new(Arc::new(Mutex::new(
+            InMemoryStorage::new(),
+        ))))
     }
 
     #[cfg(not(feature = "native-db"))]
@@ -659,16 +564,21 @@ mod tests {
     #[cfg(feature = "native-db")]
     use tokio::sync::Mutex;
 
+    /// Test helper name kept as `create_test_db_native` for minimal diff
+    /// against the many call sites below, but it now returns a ready-to-use
+    /// `Arc<dyn ConnectionStore>` (wrapping a real redb-backed `DB`) rather
+    /// than a raw `DB`, matching `ServerSender::new`'s current signature.
     #[cfg(feature = "native-db")]
-    fn create_test_db_native() -> DB {
+    fn create_test_db_native() -> Arc<dyn ConnectionStore> {
         use native_db::{Builder, Models};
         let mut models = Models::new();
         models.define::<Settings>().unwrap();
         let models: &'static Models = Box::leak(Box::new(models));
         let temp = tempfile::NamedTempFile::new().unwrap();
-        Arc::new(Mutex::new(
+        let db = Arc::new(Mutex::new(
             Builder::new().create(models, temp.path()).unwrap(),
-        ))
+        ));
+        Arc::new(NativeDbConnectionStore::new(db))
     }
 
     #[cfg(feature = "native-db")]

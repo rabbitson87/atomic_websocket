@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atomic_websocket::common::set_setting;
+use atomic_websocket::connection_store::{ConnectionStore, NativeDbConnectionStore};
 use atomic_websocket::external::bebop::Record;
 use atomic_websocket::external::native_db::{Builder, Models};
 use atomic_websocket::schema::ServerConnectInfo;
@@ -38,9 +39,16 @@ fn make_native_db() -> (NamedTempFile, DB) {
     (temp, Arc::new(Mutex::new(db)))
 }
 
-async fn make_server_sender(db: DB, options: ClientOptions) -> RwServerSender {
+fn make_connection_store(db: &DB) -> Arc<dyn ConnectionStore> {
+    Arc::new(NativeDbConnectionStore::new(db.clone()))
+}
+
+async fn make_server_sender(
+    connection_store: Arc<dyn ConnectionStore>,
+    options: ClientOptions,
+) -> RwServerSender {
     let mut ss: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
-        db,
+        connection_store,
         "".into(),
         options,
     )));
@@ -71,8 +79,9 @@ async fn store_server_ip(db: &DB, server_ip: &str, port: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_auto_scan_when_discovery_disabled() {
     let (_temp, db) = make_native_db();
+    let connection_store = make_connection_store(&db);
     let options = ClientOptions::default(); // use_scan_discovery == false
-    let ss = make_server_sender(db.clone(), options.clone()).await;
+    let ss = make_server_sender(connection_store.clone(), options.clone()).await;
 
     let mut rx = ss.get_status_receiver().await.expect("status receiver");
 
@@ -83,7 +92,7 @@ async fn no_auto_scan_when_discovery_disabled() {
             server_ip: "",
             port: &port,
         }),
-        db.clone(),
+        connection_store.clone(),
         ss.clone(),
         options.clone(),
     );
@@ -112,10 +121,14 @@ async fn direct_fixed_ip_connects() {
     let server = TestServer::start(port).await;
 
     let (_temp, db) = make_native_db();
+    let connection_store = make_connection_store(&db);
     let options = ClientOptions::default();
-    let ss = make_server_sender(db.clone(), options.clone()).await;
+    let ss = make_server_sender(connection_store.clone(), options.clone()).await;
 
     // Pre-store the fixed server IP, as a deployed tablet would have saved it.
+    // Written directly to the shared Settings table (bypassing ConnectionStore)
+    // to simulate an external writer — the library must still pick it up when
+    // it reads the same key through ConnectionStore::get_server_connect_info.
     let url = format!("ws://127.0.0.1:{port}");
     let port_str = port.to_string();
     store_server_ip(&db, &url, &port_str).await;
@@ -127,7 +140,7 @@ async fn direct_fixed_ip_connects() {
             server_ip: "",
             port: &port_str,
         }),
-        db.clone(),
+        connection_store.clone(),
         ss.clone(),
         options.clone(),
     )
@@ -156,12 +169,13 @@ async fn direct_fixed_ip_connects() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scan_discovery_is_single_flight() {
     let (_temp, db) = make_native_db();
+    let connection_store = make_connection_store(&db);
     let mut options = ClientOptions::default();
     options.use_scan_discovery = true;
     // Long timeout: if the guard failed to engage, the call would enter the scan
     // and block far beyond the 3s assertion window below.
     options.scan_timeout_seconds = 60;
-    let ss = make_server_sender(db.clone(), options.clone()).await;
+    let ss = make_server_sender(connection_store.clone(), options.clone()).await;
 
     // Simulate a scan already in progress.
     ss.write().await.is_scanning = true;
@@ -172,7 +186,7 @@ async fn scan_discovery_is_single_flight() {
             server_ip: "",
             port: &port,
         }),
-        db.clone(),
+        connection_store.clone(),
         ss.clone(),
         options.clone(),
     );

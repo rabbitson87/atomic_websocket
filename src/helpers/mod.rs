@@ -1,6 +1,7 @@
 pub mod builder;
 pub mod client_sender;
 pub mod common;
+pub mod connection_store;
 pub mod error;
 pub mod get_internal_websocket;
 pub mod get_outer_websocket;

@@ -221,7 +221,14 @@ impl AtomicServer {
         tokio::spawn(async move {
             if let Err(e) = handle_upgraded_connection(cs, peer, ws_stream).await {
                 match e {
-                    Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => (),
+                    // AlreadyClosed hits whenever a message was already
+                    // queued for send when the peer's close handshake
+                    // completed (a normal disconnect race, not a bug) — same
+                    // "expected, not actionable" bucket as ConnectionClosed.
+                    Error::ConnectionClosed
+                    | Error::AlreadyClosed
+                    | Error::Protocol(_)
+                    | Error::Utf8(_) => (),
                     err => log_error!("Error processing upgraded connection: {}", err),
                 }
             }
@@ -364,7 +371,14 @@ where
 {
     if let Err(e) = handle_connection(client_senders, peer, stream).await {
         match e {
-            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => (),
+            // AlreadyClosed hits whenever a message (e.g. a queued Pong
+            // reply) was already in flight when the peer's close handshake
+            // completed on this end — a normal disconnect race, not a bug.
+            // Same "expected, not actionable" bucket as ConnectionClosed.
+            Error::ConnectionClosed
+            | Error::AlreadyClosed
+            | Error::Protocol(_)
+            | Error::Utf8(_) => (),
             err => log_error!("Error processing connection: {}", err),
         }
     }

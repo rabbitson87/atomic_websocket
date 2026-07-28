@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::net::UdpSocket;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "bebop")]
@@ -14,19 +15,18 @@ use crate::helpers::get_internal_websocket::{handle_websocket, TryConnectGuard};
 use crate::helpers::get_outer_websocket::wrap_get_outer_websocket;
 use crate::helpers::scan_manager::ScanManager;
 use crate::helpers::{
-    common::{get_setting_by_key, make_ping_message},
-    get_internal_websocket::{get_id, wrap_get_internal_websocket},
+    common::make_ping_message,
+    connection_store::ConnectionStore,
+    get_internal_websocket::wrap_get_internal_websocket,
     server_sender::{SenderStatus, ServerSenderTrait},
     traits::date_time::now,
 };
-use crate::{helpers::metrics::Metrics, log_debug, log_error, AtomicWebsocketType, Settings};
-#[cfg(feature = "bebop")]
-use bebop::Record;
+use crate::{helpers::metrics::Metrics, log_debug, log_error, AtomicWebsocketType};
 
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 
-use super::types::{save_key, RwServerSender, DB};
+use super::types::RwServerSender;
 
 /// Configuration options for WebSocket client connections.
 ///
@@ -132,9 +132,9 @@ impl AtomicClient {
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing client state
-    pub async fn internal_initialize(&self, db: DB) {
-        self.regist_id(db.clone()).await;
+    /// * `connection_store` - Persistence for connection-identity state
+    pub async fn internal_initialize(&self, connection_store: Arc<dyn ConnectionStore>) {
+        self.regist_id(connection_store).await;
         tokio::spawn(internal_ping_loop_cheker(
             self.server_sender.clone(),
             self.options.clone(),
@@ -149,11 +149,11 @@ impl AtomicClient {
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing client state
-    pub async fn outer_initialize(&self, db: DB) {
+    /// * `connection_store` - Persistence for connection-identity state
+    pub async fn outer_initialize(&self, connection_store: Arc<dyn ConnectionStore>) {
         #[cfg(feature = "rustls")]
         self.initial_rustls();
-        self.regist_id(db.clone()).await;
+        self.regist_id(connection_store).await;
         tokio::spawn(outer_ping_loop_cheker(
             self.server_sender.clone(),
             self.options.clone(),
@@ -184,13 +184,13 @@ impl AtomicClient {
     /// # Arguments
     ///
     /// * `port` - The port to scan for (e.g. "9000")
-    /// * `db` - Database instance used to persist the discovered connection info
+    /// * `connection_store` - Persistence used to persist the discovered connection info
     ///
     /// # Returns
     ///
     /// `true` if a server was found and a connection was started, `false`
     /// otherwise (timeout, already connecting, or no local network).
-    pub async fn scan_and_connect(&self, port: &str, db: DB) -> bool {
+    pub async fn scan_and_connect(&self, port: &str, connection_store: Arc<dyn ConnectionStore>) -> bool {
         // Respect the same duplicate-connection guard as the normal path.
         if !self.server_sender.is_need_connect().await {
             return false;
@@ -241,7 +241,7 @@ impl AtomicClient {
                 let options = self.options.clone();
                 tokio::spawn(async move {
                     if let Err(error) = handle_websocket(
-                        db,
+                        connection_store,
                         server_sender.clone(),
                         options,
                         server_ip,
@@ -266,13 +266,16 @@ impl AtomicClient {
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing connection state
+    /// * `connection_store` - Persistence for connection-identity state
     ///
     /// # Returns
     ///
     /// A Result indicating whether the connection process was initiated successfully
-    pub async fn get_outer_connect(&self, db: DB) -> Result<(), Box<dyn Error>> {
-        get_outer_connect(db, self.server_sender.clone(), self.options.clone()).await
+    pub async fn get_outer_connect(
+        &self,
+        connection_store: Arc<dyn ConnectionStore>,
+    ) -> Result<(), Box<dyn Error>> {
+        get_outer_connect(connection_store, self.server_sender.clone(), self.options.clone()).await
     }
 
     /// Initiates a connection to an internal server.
@@ -280,7 +283,7 @@ impl AtomicClient {
     /// # Arguments
     ///
     /// * `input` - Optional server connection information
-    /// * `db` - Database instance for storing connection state
+    /// * `connection_store` - Persistence for connection-identity state
     ///
     /// # Returns
     ///
@@ -289,9 +292,15 @@ impl AtomicClient {
     pub async fn get_internal_connect(
         &self,
         input: Option<ServerConnectInfo<'_>>,
-        db: DB,
+        connection_store: Arc<dyn ConnectionStore>,
     ) -> Result<(), Box<dyn Error>> {
-        get_internal_connect(input, db, self.server_sender.clone(), self.options.clone()).await
+        get_internal_connect(
+            input,
+            connection_store,
+            self.server_sender.clone(),
+            self.options.clone(),
+        )
+        .await
     }
 
     /// Initiates a connection to an internal server (without native-db but with bebop).
@@ -299,9 +308,15 @@ impl AtomicClient {
     pub async fn get_internal_connect(
         &self,
         _input: Option<ServerConnectInfo<'_>>,
-        db: DB,
+        connection_store: Arc<dyn ConnectionStore>,
     ) -> Result<(), Box<dyn Error>> {
-        get_internal_connect(None, db, self.server_sender.clone(), self.options.clone()).await
+        get_internal_connect(
+            None,
+            connection_store,
+            self.server_sender.clone(),
+            self.options.clone(),
+        )
+        .await
     }
 
     /// Initiates a connection to an internal server (without bebop).
@@ -309,9 +324,15 @@ impl AtomicClient {
     pub async fn get_internal_connect(
         &self,
         _input: Option<()>,
-        db: DB,
+        connection_store: Arc<dyn ConnectionStore>,
     ) -> Result<(), Box<dyn Error>> {
-        get_internal_connect(None, db, self.server_sender.clone(), self.options.clone()).await
+        get_internal_connect(
+            None,
+            connection_store,
+            self.server_sender.clone(),
+            self.options.clone(),
+        )
+        .await
     }
 
     /// Initializes the rustls cryptography provider for secure connections.
@@ -328,62 +349,13 @@ impl AtomicClient {
         }
     }
 
-    /// Registers a unique client ID in the database if one doesn't exist.
+    /// Registers a unique client ID if one doesn't exist.
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance
-    #[cfg(feature = "native-db")]
-    pub async fn regist_id(&self, db: DB) {
-        // Run the synchronous redb work (including the fsync on commit) on the
-        // blocking pool so it never stalls a Tokio worker thread.
-        let _ = tokio::task::spawn_blocking(move || {
-            let db = db.blocking_lock();
-            let Ok(reader) = db.r_transaction() else {
-                log_error!("Failed to create r_transaction for regist_id");
-                return;
-            };
-            let data = match reader.get().primary::<Settings>(save_key::CLIENT_ID) {
-                Ok(data) => data,
-                Err(e) => {
-                    log_error!("Failed to get ClientId: {:?}", e);
-                    return;
-                }
-            };
-            drop(reader);
-
-            if data.is_none() {
-                use nanoid::nanoid;
-                let Ok(writer) = db.rw_transaction() else {
-                    log_error!("Failed to create rw_transaction for regist_id");
-                    return;
-                };
-                if let Err(e) = writer.insert::<Settings>(Settings {
-                    key: save_key::CLIENT_ID.to_owned(),
-                    value: nanoid!().as_bytes().to_vec(),
-                }) {
-                    log_error!("Failed to insert ClientId: {:?}", e);
-                    return;
-                }
-                if let Err(e) = writer.commit() {
-                    log_error!("Failed to commit ClientId: {:?}", e);
-                }
-            }
-        })
-        .await;
-    }
-
-    /// Registers a unique client ID in memory if one doesn't exist.
-    #[cfg(not(feature = "native-db"))]
-    pub async fn regist_id(&self, db: DB) {
-        let mut db = db.lock().await;
-        if db.get(save_key::CLIENT_ID).is_none() {
-            use nanoid::nanoid;
-            db.insert(
-                save_key::CLIENT_ID.to_owned(),
-                nanoid!().as_bytes().to_vec(),
-            );
-        }
+    /// * `connection_store` - Persistence for connection-identity state
+    pub async fn regist_id(&self, connection_store: Arc<dyn ConnectionStore>) {
+        connection_store.ensure_client_id().await;
     }
 
     /// Gets a receiver for connection status updates.
@@ -461,15 +433,17 @@ async fn internal_ping_loop_cheker(
 
             // Attempt reconnection with exponential backoff
             server_sender.send_status(SenderStatus::Reconnecting).await;
-            let (metrics, db) = {
+            let (metrics, connection_store) = {
                 let guard = server_sender.read().await;
-                (guard.metrics.clone(), guard.db.clone())
+                (guard.metrics.clone(), guard.connection_store.clone())
             };
             metrics.inc_reconnections();
             let server_sender = server_sender.clone();
             let options = options.clone();
             tokio::spawn(async move {
-                if let Err(e) = get_internal_connect(None, db, server_sender, options).await {
+                if let Err(e) =
+                    get_internal_connect(None, connection_store, server_sender, options).await
+                {
                     log_error!("Internal reconnection failed: {:?}", e);
                 }
             });
@@ -484,9 +458,9 @@ async fn internal_ping_loop_cheker(
         {
             if options.use_ping {
                 log_debug!("Try ping from loop checker");
-                let db = server_sender_read.db.clone();
+                let connection_store = server_sender_read.connection_store.clone();
                 drop(server_sender_read);
-                let id: String = get_id(db).await;
+                let id: String = connection_store.get_client_id().await;
                 server_sender.send(make_ping_message(&id)).await;
             }
         } else {
@@ -540,15 +514,15 @@ async fn outer_ping_loop_cheker(
 
             // Attempt reconnection with exponential backoff
             server_sender.send_status(SenderStatus::Reconnecting).await;
-            let (metrics, db) = {
+            let (metrics, connection_store) = {
                 let guard = server_sender.read().await;
-                (guard.metrics.clone(), guard.db.clone())
+                (guard.metrics.clone(), guard.connection_store.clone())
             };
             metrics.inc_reconnections();
             let server_sender = server_sender.clone();
             let options = options.clone();
             tokio::spawn(async move {
-                if let Err(e) = get_outer_connect(db, server_sender, options).await {
+                if let Err(e) = get_outer_connect(connection_store, server_sender, options).await {
                     log_error!("External reconnection failed: {:?}", e);
                 }
             });
@@ -569,9 +543,9 @@ async fn outer_ping_loop_cheker(
 
             if options.use_ping {
                 log_debug!("Try ping from loop checker");
-                let db = server_sender_read.db.clone();
+                let connection_store = server_sender_read.connection_store.clone();
                 drop(server_sender_read);
-                let id: String = get_id(db).await;
+                let id: String = connection_store.get_client_id().await;
                 server_sender.send(make_ping_message(&id)).await;
             }
         } else {
@@ -586,7 +560,7 @@ async fn outer_ping_loop_cheker(
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options
 ///
@@ -594,7 +568,7 @@ async fn outer_ping_loop_cheker(
 ///
 /// A Result indicating whether the connection process was initiated successfully
 pub async fn get_outer_connect(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
@@ -609,8 +583,7 @@ pub async fn get_outer_connect(
         return Ok(());
     }
 
-    let server_connect_info =
-        get_setting_by_key(db.clone(), save_key::SERVER_CONNECT_INFO.to_owned()).await?;
+    let server_connect_info = connection_store.get_server_connect_info().await;
     log_debug!("server_connect_info: {:?}", server_connect_info);
 
     // Cannot connect if no URL is provided and no stored server IP
@@ -621,7 +594,11 @@ pub async fn get_outer_connect(
 
     // Spawn connection task
     server_sender.send_status(SenderStatus::Connecting).await;
-    tokio::spawn(wrap_get_outer_websocket(db, server_sender, options));
+    tokio::spawn(wrap_get_outer_websocket(
+        connection_store,
+        server_sender,
+        options,
+    ));
     Ok(())
 }
 
@@ -632,7 +609,7 @@ pub async fn get_outer_connect(
 /// # Arguments
 ///
 /// * `input` - Optional server connection information
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options
 ///
@@ -642,7 +619,7 @@ pub async fn get_outer_connect(
 #[cfg(all(feature = "native-db", feature = "bebop"))]
 pub async fn get_internal_connect(
     input: Option<ServerConnectInfo<'_>>,
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
@@ -657,40 +634,15 @@ pub async fn get_internal_connect(
         return Ok(());
     }
 
-    let server_connect_info =
-        get_setting_by_key(db.clone(), save_key::SERVER_CONNECT_INFO.to_owned()).await?;
+    let server_connect_info = connection_store.get_server_connect_info().await;
     log_debug!("server_connect_info: {:?}", server_connect_info);
 
-    // Store connection info in database if provided and not already present.
-    // Runs on the blocking pool so the commit's fsync never stalls a worker thread.
+    // Reserve the port ahead of the first successful connection, if provided
+    // and not already present.
     if let (Some(input_ref), None) = (input.as_ref(), server_connect_info.as_ref()) {
-        let port = input_ref.port.to_string();
-        let db_clone = db.clone();
-        let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
-            let db = db_clone.blocking_lock();
-            let writer = db.rw_transaction().map_err(|e| e.to_string())?;
-            let mut value = Vec::new();
-            ServerConnectInfo {
-                server_ip: "",
-                port: &port,
-            }
-            .serialize(&mut value)
-            .map_err(|e| e.to_string())?;
-            writer
-                .insert::<Settings>(Settings {
-                    key: save_key::SERVER_CONNECT_INFO.to_owned(),
-                    value,
-                })
-                .map_err(|e| e.to_string())?;
-            writer.commit().map_err(|e| e.to_string())?;
-            Ok(())
-        })
-        .await;
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e.into()),
-            Err(e) => return Err(e.to_string().into()),
-        }
+        connection_store
+            .set_server_connect_info("", input_ref.port)
+            .await;
     }
 
     // Cannot connect if no input or stored connection info
@@ -700,37 +652,25 @@ pub async fn get_internal_connect(
     }
 
     // Determine connection info to use
-    let connect_info_data = match input.as_ref() {
-        Some(info) => ServerConnectInfo {
-            server_ip: match server_connect_info.as_ref() {
-                Some(server_connect_info) => {
-                    match ServerConnectInfo::deserialize(&server_connect_info.value) {
-                        Ok(info) => info.server_ip,
-                        Err(_) => "",
-                    }
-                }
-                None => "",
-            },
-            port: info.port,
-        },
+    let (connect_server_ip, connect_port): (String, String) = match input.as_ref() {
+        Some(info) => {
+            let server_ip = server_connect_info
+                .as_ref()
+                .map(|(ip, _)| ip.clone())
+                .unwrap_or_default();
+            (server_ip, info.port.to_owned())
+        }
         None => {
-            let Some(ref stored_info) = server_connect_info else {
+            let Some((server_ip, port)) = server_connect_info else {
                 server_sender.send_status(SenderStatus::Disconnected).await;
                 return Ok(());
             };
-            match ServerConnectInfo::deserialize(&stored_info.value) {
-                Ok(info) => info,
-                Err(e) => {
-                    log_error!("Failed to deserialize ServerConnectInfo: {:?}", e);
-                    server_sender.send_status(SenderStatus::Disconnected).await;
-                    return Ok(());
-                }
-            }
+            (server_ip, port)
         }
     };
 
     // Connect directly to known server IP or, only if explicitly enabled, scan.
-    match connect_info_data.server_ip {
+    match connect_server_ip.as_str() {
         // No known server IP. In fixed-IP deployments the address is typed in,
         // so we do NOT auto-scan unless `use_scan_discovery` is enabled. The app
         // keeps running and the user can enter the IP or press "search"
@@ -765,7 +705,7 @@ pub async fn get_internal_connect(
 
             // Bounded scan — must not run forever when no server is present.
             let scan_timeout = Duration::from_secs(options.scan_timeout_seconds.max(1));
-            let found = ScanManager::new(connect_info_data.port)
+            let found = ScanManager::new(&connect_port)
                 .run_with_timeout(scan_timeout)
                 .await;
 
@@ -780,7 +720,7 @@ pub async fn get_internal_connect(
                         Some(connect_guard) => {
                             tokio::spawn(async move {
                                 if let Err(error) = handle_websocket(
-                                    db,
+                                    connection_store,
                                     server_sender.clone(),
                                     options,
                                     server_ip,
@@ -812,7 +752,7 @@ pub async fn get_internal_connect(
         _server_ip => {
             server_sender.send_status(SenderStatus::Connecting).await;
             tokio::spawn(wrap_get_internal_websocket(
-                db.clone(),
+                connection_store,
                 server_sender.clone(),
                 _server_ip.into(),
                 options.clone(),
@@ -827,7 +767,7 @@ pub async fn get_internal_connect(
 #[cfg(not(all(feature = "native-db", feature = "bebop")))]
 pub async fn get_internal_connect(
     _input: Option<()>,
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
 ) -> Result<(), Box<dyn Error>> {
@@ -879,7 +819,7 @@ pub async fn get_internal_connect(
                 Some(connect_guard) => {
                     tokio::spawn(async move {
                         if let Err(error) = handle_websocket(
-                            db,
+                            connection_store,
                             server_sender.clone(),
                             options,
                             server_ip,

@@ -22,6 +22,7 @@ use crate::helpers::common::get_data_schema;
 use crate::{
     helpers::{
         common::{make_disconnect_message, make_ping_message},
+        connection_store::ConnectionStore,
         server_sender::{SenderStatus, ServerSenderTrait},
         traits::atomic::FlagAtomic,
     },
@@ -90,7 +91,7 @@ impl Drop for TryConnectGuard {
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `server_ip` - Server address to connect to
 /// * `options` - Client connection options
@@ -99,12 +100,12 @@ impl Drop for TryConnectGuard {
 ///
 /// `true` if the connection was successfully established, `false` otherwise
 pub async fn wrap_get_internal_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     server_ip: String,
     options: ClientOptions,
 ) -> bool {
-    match get_internal_websocket(db, server_sender, server_ip, options).await {
+    match get_internal_websocket(connection_store, server_sender, server_ip, options).await {
         Ok(_) => true,
         Err(e) => {
             log_error!("Error getting websocket: {:?}", e);
@@ -120,7 +121,7 @@ pub async fn wrap_get_internal_websocket(
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `server_ip` - Server address to connect to
 /// * `options` - Client connection options
@@ -129,7 +130,7 @@ pub async fn wrap_get_internal_websocket(
 ///
 /// A Result indicating whether the connection process completed successfully
 pub async fn get_internal_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     server_ip: String,
     options: ClientOptions,
@@ -151,7 +152,7 @@ pub async fn get_internal_websocket(
     {
         Ok(Ok((ws_stream, _))) => {
             if let Err(err) = handle_websocket(
-                db,
+                connection_store,
                 server_sender.clone(),
                 options,
                 server_ip.clone(),
@@ -184,7 +185,7 @@ pub async fn get_internal_websocket(
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options
 /// * `server_ip` - Server address connected to
@@ -199,7 +200,7 @@ pub async fn get_internal_websocket(
 /// it for the life of the connection and disarms it on normal exit.
 #[cfg(feature = "bebop")]
 pub async fn handle_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
     server_ip: String,
@@ -210,7 +211,7 @@ pub async fn handle_websocket(
     log_debug!("Connected to {} for web socket", server_ip);
 
     let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
-    let id = get_id(db.clone()).await;
+    let id = connection_store.get_client_id().await;
     server_sender.add(sx.clone(), &server_ip).await;
 
     let mut is_first = true;
@@ -330,13 +331,14 @@ pub async fn handle_websocket(
 /// Handles an established WebSocket connection (raw bytes version).
 #[cfg(not(feature = "bebop"))]
 pub async fn handle_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     mut connect_guard: TryConnectGuard,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
+    let _ = connection_store;
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 

@@ -15,9 +15,11 @@
 //! ```rust,ignore
 //! use atomic_websocket::{
 //!     AtomicWebsocket,
+//!     connection_store::{ConnectionStore, NativeDbConnectionStore},
 //!     server_sender::{ClientOptions, SenderStatus},
 //!     schema::ServerConnectInfo,
 //! };
+//! use std::sync::Arc;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,13 +28,17 @@
 //!     client_options.retry_seconds = 2;
 //!     client_options.use_keep_ip = true;
 //!
-//!     // Initialize DB (implementation details omitted)
+//!     // Initialize your own DB (implementation details omitted), then wrap
+//!     // it once in a ConnectionStore — the library never touches your DB
+//!     // handle directly, only through this trait.
 //!     let db = initialize_database().await?;
+//!     let connection_store: Arc<dyn ConnectionStore> =
+//!         Arc::new(NativeDbConnectionStore::new(db.clone()));
 //!     let server_sender = initialize_server_sender().await?;
 //!
 //!     // Create client
 //!     let atomic_client = AtomicWebsocket::get_internal_client_with_server_sender(
-//!         db.clone(),
+//!         connection_store.clone(),
 //!         client_options,
 //!         server_sender.clone(),
 //!     ).await;
@@ -44,7 +50,7 @@
 //!                 server_ip: "",
 //!                 port: "9000",
 //!             }),
-//!             db.clone(),
+//!             connection_store.clone(),
 //!         )
 //!         .await;
 //!
@@ -87,9 +93,9 @@
 use std::sync::Arc;
 
 use helpers::{
+    connection_store::ConnectionStore,
     internal_client::{AtomicClient, ClientOptions},
     internal_server::{AtomicServer, ServerOptions},
-    types::DB,
 };
 #[cfg(feature = "native-db")]
 use native_db::{native_db, ToKey};
@@ -140,6 +146,14 @@ pub mod server_sender {
         get_internal_connect, get_ip_address, ClientOptions,
     };
     pub use crate::helpers::server_sender::*;
+}
+
+/// Module providing the pluggable connection-identity persistence trait
+/// (client ID + last-known server connect info) used by `ServerSender`/
+/// `AtomicClient`, plus the library's default `Settings`-table-backed
+/// implementation.
+pub mod connection_store {
+    pub use crate::helpers::connection_store::{ConnectionStore, NativeDbConnectionStore};
 }
 
 /// Module providing common utility functions for WebSocket communication.
@@ -219,7 +233,7 @@ impl AtomicWebsocket {
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing settings and state
+    /// * `connection_store` - Persistence for connection-identity state (client ID, server connect info)
     /// * `options` - Client connection options (auto-reconnect, ping intervals, etc.)
     ///
     /// # Returns
@@ -230,18 +244,21 @@ impl AtomicWebsocket {
     ///
     /// ```rust,ignore
     /// let client_options = ClientOptions::default();
-    /// let client = AtomicWebsocket::get_internal_client(db.clone(), client_options).await;
+    /// let client = AtomicWebsocket::get_internal_client(connection_store.clone(), client_options).await;
     /// ```
-    pub async fn get_internal_client(db: DB, mut options: ClientOptions) -> AtomicClient {
+    pub async fn get_internal_client(
+        connection_store: Arc<dyn ConnectionStore>,
+        mut options: ClientOptions,
+    ) -> AtomicClient {
         options.atomic_websocket_type = AtomicWebsocketType::Internal;
-        get_client(db, options, None).await
+        get_client(connection_store, options, None).await
     }
 
     /// Creates a client instance for internal network use with an existing ServerSender.
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing settings and state
+    /// * `connection_store` - Persistence for connection-identity state
     /// * `options` - Client connection options
     /// * `server_sender` - Existing ServerSender instance
     ///
@@ -249,34 +266,37 @@ impl AtomicWebsocket {
     ///
     /// A newly created `AtomicClient` instance
     pub async fn get_internal_client_with_server_sender(
-        db: DB,
+        connection_store: Arc<dyn ConnectionStore>,
         mut options: ClientOptions,
         server_sender: RwServerSender,
     ) -> AtomicClient {
         options.atomic_websocket_type = AtomicWebsocketType::Internal;
-        get_client(db, options, Some(server_sender)).await
+        get_client(connection_store, options, Some(server_sender)).await
     }
 
     /// Creates a client instance for external servers.
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing settings and state
+    /// * `connection_store` - Persistence for connection-identity state
     /// * `options` - Client connection options (including URL, TLS settings, etc.)
     ///
     /// # Returns
     ///
     /// A newly created `AtomicClient` instance
-    pub async fn get_outer_client(db: DB, mut options: ClientOptions) -> AtomicClient {
+    pub async fn get_outer_client(
+        connection_store: Arc<dyn ConnectionStore>,
+        mut options: ClientOptions,
+    ) -> AtomicClient {
         options.atomic_websocket_type = AtomicWebsocketType::External;
-        get_client(db, options, None).await
+        get_client(connection_store, options, None).await
     }
 
     /// Creates a client instance for external servers with an existing ServerSender.
     ///
     /// # Arguments
     ///
-    /// * `db` - Database instance for storing settings and state
+    /// * `connection_store` - Persistence for connection-identity state
     /// * `options` - Client connection options
     /// * `server_sender` - Existing ServerSender instance
     ///
@@ -284,12 +304,12 @@ impl AtomicWebsocket {
     ///
     /// A newly created `AtomicClient` instance
     pub async fn get_outer_client_with_server_sender(
-        db: DB,
+        connection_store: Arc<dyn ConnectionStore>,
         mut options: ClientOptions,
         server_sender: RwServerSender,
     ) -> AtomicClient {
         options.atomic_websocket_type = AtomicWebsocketType::External;
-        get_client(db, options, Some(server_sender)).await
+        get_client(connection_store, options, Some(server_sender)).await
     }
 
     /// Creates a server instance for internal network use.
@@ -340,7 +360,7 @@ impl AtomicWebsocket {
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance
+/// * `connection_store` - Persistence for connection-identity state
 /// * `options` - Client options
 /// * `atomic_websocket_type` - Connection type (Internal or External)
 /// * `server_sender` - Optional existing ServerSender instance
@@ -349,7 +369,7 @@ impl AtomicWebsocket {
 ///
 /// An initialized AtomicClient instance
 async fn get_client(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     options: ClientOptions,
     server_sender: Option<RwServerSender>,
 ) -> AtomicClient {
@@ -363,7 +383,7 @@ async fn get_client(
             server_sender
         }
         None => Arc::new(RwLock::new(ServerSender::new(
-            db.clone(),
+            connection_store.clone(),
             options.url.clone(),
             options.clone(),
         ))),
@@ -377,8 +397,12 @@ async fn get_client(
         cancel_token,
     };
     match atomic_websocket.options.atomic_websocket_type {
-        AtomicWebsocketType::Internal => atomic_websocket.internal_initialize(db.clone()).await,
-        AtomicWebsocketType::External => atomic_websocket.outer_initialize(db.clone()).await,
+        AtomicWebsocketType::Internal => {
+            atomic_websocket.internal_initialize(connection_store).await
+        }
+        AtomicWebsocketType::External => {
+            atomic_websocket.outer_initialize(connection_store).await
+        }
     }
     atomic_websocket
 }

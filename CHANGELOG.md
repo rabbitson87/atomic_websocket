@@ -1,5 +1,12 @@
 # Changes
 
+## 0.9.0
+
+* **Breaking:** Decouple the client-side connection APIs from the host app's `db` handle.
+  * Added `connection_store::ConnectionStore` — a small trait covering exactly the state the library manages internally (client ID, last-known server connect info), plus `NativeDbConnectionStore`, a bundled implementation that is a behavior-preserving wrapper around the existing `Settings`-table logic (same keys, same serialization, same `spawn_blocking` handling of the redb fsync).
+  * `ServerSender::new`, `AtomicWebsocket::get_internal_client*`/`get_outer_client*`, `AtomicClient::internal_initialize`/`outer_initialize`/`regist_id`/`scan_and_connect`/`get_outer_connect`/`get_internal_connect`, and the free functions `get_outer_connect`/`get_internal_connect` now take `connection_store: Arc<dyn ConnectionStore>` instead of `db: DB`. Migration is a one-line wrap at each call site: `Arc::new(NativeDbConnectionStore::new(db.clone()))` built once, in place of `db.clone()`.
+  * Unaffected: `DB`, `Settings`, `save_key`, and the generic `get_setting_by_key`/`set_setting`/`remove_setting`/`get_id` helpers are unchanged — apps using them directly for their own settings, or reading/writing the `Settings` table directly for `atomic_websocket`'s own keys, need no changes. The server side (`AtomicServer`/`ClientSenders`) was already decoupled from `db` in 0.7.0 and is unaffected.
+
 ## 0.8.4
 
 * Fix a race that allowed two reconnect attempts to both dial the server concurrently, leading to reconnect instability under flaky/loaded connections.

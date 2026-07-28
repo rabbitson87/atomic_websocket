@@ -3,9 +3,14 @@
 //! This module provides functionality for establishing and maintaining WebSocket connections
 //! to external servers, with optional TLS support through the rustls feature.
 
-use super::types::{RwServerSender, DB};
+use std::sync::Arc;
+
+use super::types::RwServerSender;
 use crate::{
-    helpers::get_internal_websocket::{handle_websocket, TryConnectGuard},
+    helpers::{
+        connection_store::ConnectionStore,
+        get_internal_websocket::{handle_websocket, TryConnectGuard},
+    },
     log_error,
 };
 
@@ -21,15 +26,15 @@ use crate::log_debug;
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options, including the URL to connect to
 pub async fn wrap_get_outer_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
 ) {
-    match get_outer_websocket(db, server_sender.clone(), options).await {
+    match get_outer_websocket(connection_store, server_sender.clone(), options).await {
         Ok(_) => (),
         Err(e) => {
             // is_try_connect is owned by TryConnectGuard inside
@@ -48,7 +53,7 @@ pub async fn wrap_get_outer_websocket(
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options, including the URL to connect to
 ///
@@ -57,12 +62,11 @@ pub async fn wrap_get_outer_websocket(
 /// A Result indicating whether the connection process completed successfully
 #[cfg(feature = "rustls")]
 pub async fn get_outer_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     use rustls::{ClientConfig, RootCertStore};
-    use std::sync::Arc;
     use tokio_tungstenite::{connect_async_tls_with_config, Connector};
 
     // Claim the single-flight guard before dialing (see `TryConnectGuard`).
@@ -95,7 +99,7 @@ pub async fn get_outer_websocket(
     {
         Ok(Ok((ws_stream, _))) => {
             handle_websocket(
-                db,
+                connection_store,
                 server_sender.clone(),
                 options,
                 server_ip.clone(),
@@ -123,7 +127,7 @@ pub async fn get_outer_websocket(
 ///
 /// # Arguments
 ///
-/// * `db` - Database instance for storing connection state
+/// * `connection_store` - Persistence for connection-identity state
 /// * `server_sender` - Server sender for message handling
 /// * `options` - Client connection options, including the URL to connect to
 ///
@@ -132,7 +136,7 @@ pub async fn get_outer_websocket(
 /// A Result indicating whether the connection process completed successfully
 #[cfg(not(feature = "rustls"))]
 pub async fn get_outer_websocket(
-    db: DB,
+    connection_store: Arc<dyn ConnectionStore>,
     server_sender: RwServerSender,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
@@ -157,7 +161,7 @@ pub async fn get_outer_websocket(
     .await
     {
         handle_websocket(
-            db,
+            connection_store,
             server_sender.clone(),
             options,
             server_ip.clone(),

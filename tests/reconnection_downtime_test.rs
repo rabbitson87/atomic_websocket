@@ -13,12 +13,17 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
+use atomic_websocket::connection_store::{ConnectionStore, NativeDbConnectionStore};
 use atomic_websocket::server_sender::{
     ClientOptions, SenderStatus, ServerSender, ServerSenderTrait,
 };
 use atomic_websocket::types::RwServerSender;
 use atomic_websocket::{AtomicWebsocket, AtomicWebsocketType};
 use tokio::sync::{Mutex, RwLock};
+
+fn create_connection_store(db: &atomic_websocket::types::DB) -> Arc<dyn ConnectionStore> {
+    Arc::new(NativeDbConnectionStore::new(db.clone()))
+}
 
 use common::{find_available_port, simulate_long_downtime, wait_for_status, TestServer};
 
@@ -65,6 +70,7 @@ async fn setup_external_client(
     atomic_websocket::types::DB,
 ) {
     let db = create_test_db();
+    let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
         url: format!("127.0.0.1:{}", port),
@@ -78,14 +84,14 @@ async fn setup_external_client(
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
-        db.clone(),
+        connection_store.clone(),
         options.url.clone(),
         options.clone(),
     )));
     server_sender.regist(server_sender.clone()).await;
 
     let client = AtomicWebsocket::get_outer_client_with_server_sender(
-        db.clone(),
+        connection_store.clone(),
         options,
         server_sender.clone(),
     )
@@ -94,7 +100,7 @@ async fn setup_external_client(
     let status_rx = client.get_status_receiver().await.expect("status receiver");
 
     // Initiate connection
-    client.get_outer_connect(db.clone()).await.unwrap();
+    client.get_outer_connect(connection_store.clone()).await.unwrap();
 
     // The client's ping loop checker is already spawned and holds Arc refs,
     // so it stays alive. We forget the client struct to avoid drop issues.
@@ -114,6 +120,7 @@ async fn setup_internal_client_no_connect(
     atomic_websocket::types::DB,
 ) {
     let db = create_test_db();
+    let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
         url: format!("127.0.0.1:{}", port),
@@ -127,14 +134,14 @@ async fn setup_internal_client_no_connect(
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
-        db.clone(),
+        connection_store.clone(),
         String::new(),
         options.clone(),
     )));
     server_sender.regist(server_sender.clone()).await;
 
     let client = AtomicWebsocket::get_internal_client_with_server_sender(
-        db.clone(),
+        connection_store.clone(),
         options,
         server_sender.clone(),
     )
@@ -552,6 +559,7 @@ async fn test_external_no_false_disconnect_when_never_connected() {
     // Do NOT start a server
 
     let db = create_test_db();
+    let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
         url: format!("127.0.0.1:{}", port),
@@ -565,14 +573,14 @@ async fn test_external_no_false_disconnect_when_never_connected() {
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
-        db.clone(),
+        connection_store.clone(),
         options.url.clone(),
         options.clone(),
     )));
     server_sender.regist(server_sender.clone()).await;
 
     let client = AtomicWebsocket::get_outer_client_with_server_sender(
-        db.clone(),
+        connection_store.clone(),
         options,
         server_sender.clone(),
     )
@@ -910,6 +918,7 @@ async fn test_concurrent_connect_triggers_dial_only_once() {
     let server = TestServer::start(port).await;
 
     let db = create_test_db();
+    let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
         url: format!("127.0.0.1:{}", port),
@@ -923,14 +932,14 @@ async fn test_concurrent_connect_triggers_dial_only_once() {
     };
 
     let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
-        db.clone(),
+        connection_store.clone(),
         options.url.clone(),
         options.clone(),
     )));
     server_sender.regist(server_sender.clone()).await;
 
     let client = AtomicWebsocket::get_outer_client_with_server_sender(
-        db.clone(),
+        connection_store.clone(),
         options,
         server_sender.clone(),
     )
@@ -942,8 +951,8 @@ async fn test_concurrent_connect_triggers_dial_only_once() {
     // ping-loop checker and an app-level reconnect call racing during the
     // same handshake window.
     let (r1, r2) = tokio::join!(
-        client.get_outer_connect(db.clone()),
-        client.get_outer_connect(db.clone())
+        client.get_outer_connect(connection_store.clone()),
+        client.get_outer_connect(connection_store.clone())
     );
     r1.expect("first get_outer_connect should not error");
     r2.expect("second get_outer_connect should not error");
