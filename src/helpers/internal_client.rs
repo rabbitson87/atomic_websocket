@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[cfg(feature = "bebop")]
 use crate::generated::schema::ServerConnectInfo;
-use crate::helpers::get_internal_websocket::handle_websocket;
+use crate::helpers::get_internal_websocket::{handle_websocket, TryConnectGuard};
 use crate::helpers::get_outer_websocket::wrap_get_outer_websocket;
 use crate::helpers::scan_manager::ScanManager;
 use crate::helpers::{
@@ -225,15 +225,32 @@ impl AtomicClient {
 
         match found {
             Some((server_ip, ws_stream)) => {
+                // Claim the single-flight guard now, before handing off to
+                // handle_websocket — closes the gap between "scan succeeded"
+                // and "connection registered" that a concurrent reconnect
+                // trigger could otherwise slip through.
+                let Some(connect_guard) =
+                    TryConnectGuard::try_acquire(self.server_sender.clone()).await
+                else {
+                    log_debug!(
+                        "Scan found a server but a connection attempt is already in progress"
+                    );
+                    return false;
+                };
                 let server_sender = self.server_sender.clone();
                 let options = self.options.clone();
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream)
-                            .await
+                    if let Err(error) = handle_websocket(
+                        db,
+                        server_sender.clone(),
+                        options,
+                        server_ip,
+                        ws_stream,
+                        connect_guard,
+                    )
+                    .await
                     {
                         log_error!("Error handling websocket: {:?}", error);
-                        server_sender.write().await.is_try_connect = false;
                     }
                 });
                 true
@@ -757,20 +774,31 @@ pub async fn get_internal_connect(
 
             match found {
                 Some((server_ip, ws_stream)) => {
-                    tokio::spawn(async move {
-                        if let Err(error) = handle_websocket(
-                            db,
-                            server_sender.clone(),
-                            options,
-                            server_ip,
-                            ws_stream,
-                        )
-                        .await
-                        {
-                            log_error!("Error handling websocket: {:?}", error);
-                            server_sender.write().await.is_try_connect = false;
+                    // Claim the single-flight guard now, before handing off
+                    // to handle_websocket (see scan_and_connect for why).
+                    match TryConnectGuard::try_acquire(server_sender.clone()).await {
+                        Some(connect_guard) => {
+                            tokio::spawn(async move {
+                                if let Err(error) = handle_websocket(
+                                    db,
+                                    server_sender.clone(),
+                                    options,
+                                    server_ip,
+                                    ws_stream,
+                                    connect_guard,
+                                )
+                                .await
+                                {
+                                    log_error!("Error handling websocket: {:?}", error);
+                                }
+                            });
                         }
-                    });
+                        None => {
+                            log_debug!(
+                                "Scan found a server but a connection attempt is already in progress"
+                            );
+                        }
+                    }
                 }
                 None => {
                     // Timed out with no server — hand control back to the caller's
@@ -845,14 +873,31 @@ pub async fn get_internal_connect(
 
     match found {
         Some((server_ip, ws_stream)) => {
-            tokio::spawn(async move {
-                if let Err(error) =
-                    handle_websocket(db, server_sender.clone(), options, server_ip, ws_stream).await
-                {
-                    log_error!("Error handling websocket: {:?}", error);
-                    server_sender.write().await.is_try_connect = false;
+            // Claim the single-flight guard now, before handing off to
+            // handle_websocket (see scan_and_connect for why).
+            match TryConnectGuard::try_acquire(server_sender.clone()).await {
+                Some(connect_guard) => {
+                    tokio::spawn(async move {
+                        if let Err(error) = handle_websocket(
+                            db,
+                            server_sender.clone(),
+                            options,
+                            server_ip,
+                            ws_stream,
+                            connect_guard,
+                        )
+                        .await
+                        {
+                            log_error!("Error handling websocket: {:?}", error);
+                        }
+                    });
                 }
-            });
+                None => {
+                    log_debug!(
+                        "Scan found a server but a connection attempt is already in progress"
+                    );
+                }
+            }
         }
         None => {
             server_sender.send_status(SenderStatus::Disconnected).await;

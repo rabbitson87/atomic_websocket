@@ -4,7 +4,10 @@
 //! to external servers, with optional TLS support through the rustls feature.
 
 use super::types::{RwServerSender, DB};
-use crate::{helpers::get_internal_websocket::handle_websocket, log_error};
+use crate::{
+    helpers::get_internal_websocket::{handle_websocket, TryConnectGuard},
+    log_error,
+};
 
 use crate::server_sender::ClientOptions;
 use std::time::Duration;
@@ -29,8 +32,11 @@ pub async fn wrap_get_outer_websocket(
     match get_outer_websocket(db, server_sender.clone(), options).await {
         Ok(_) => (),
         Err(e) => {
+            // is_try_connect is owned by TryConnectGuard inside
+            // get_outer_websocket/handle_websocket and resets itself on
+            // drop — no manual reset needed (and doing one here risks
+            // clobbering a different, already-in-flight attempt).
             log_error!("Error getting websocket: {:?}", e);
-            server_sender.write().await.is_try_connect = false;
         }
     }
 }
@@ -58,6 +64,11 @@ pub async fn get_outer_websocket(
     use rustls::{ClientConfig, RootCertStore};
     use std::sync::Arc;
     use tokio_tungstenite::{connect_async_tls_with_config, Connector};
+
+    // Claim the single-flight guard before dialing (see `TryConnectGuard`).
+    let Some(connect_guard) = TryConnectGuard::try_acquire(server_sender.clone()).await else {
+        return Ok(());
+    };
 
     // Format the URL with 'wss://' scheme for secure WebSockets
     let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
@@ -89,10 +100,12 @@ pub async fn get_outer_websocket(
                 options,
                 server_ip.clone(),
                 ws_stream,
+                connect_guard,
             )
             .await?;
         }
         Ok(Err(e)) => {
+            // connect_guard drops here, resetting is_try_connect automatically.
             log_debug!("Failed to connect to {}: {:?}", server_ip, e);
         }
         Err(_) => {
@@ -125,6 +138,11 @@ pub async fn get_outer_websocket(
 ) -> tokio_tungstenite::tungstenite::Result<()> {
     use tokio_tungstenite::connect_async;
 
+    // Claim the single-flight guard before dialing (see `TryConnectGuard`).
+    let Some(connect_guard) = TryConnectGuard::try_acquire(server_sender.clone()).await else {
+        return Ok(());
+    };
+
     // Format the URL with 'ws://' scheme for standard WebSockets
     let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
         options.url.clone()
@@ -144,9 +162,12 @@ pub async fn get_outer_websocket(
             options,
             server_ip.clone(),
             ws_stream,
+            connect_guard,
         )
         .await?
     }
+    // If the connect attempt failed/timed out, connect_guard drops here,
+    // resetting is_try_connect automatically.
     log_debug!("Failed to server connect to {}", server_ip);
 
     Ok(())

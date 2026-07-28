@@ -1,5 +1,6 @@
 //! Common test utilities for atomic_websocket integration tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +70,7 @@ pub struct TestServer {
     pub port: u16,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     handle: JoinHandle<()>,
+    accepted_connections: Arc<AtomicUsize>,
 }
 
 impl TestServer {
@@ -85,6 +87,8 @@ impl TestServer {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let connection_handles: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
         let handles_clone = connection_handles.clone();
+        let accepted_connections = Arc::new(AtomicUsize::new(0));
+        let accepted_connections_clone = accepted_connections.clone();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -99,6 +103,7 @@ impl TestServer {
                     }
                     result = listener.accept() => {
                         if let Ok((stream, _)) = result {
+                            accepted_connections_clone.fetch_add(1, Ordering::SeqCst);
                             let h = tokio::spawn(handle_test_connection(stream));
                             handles_clone.lock().await.push(h);
                         }
@@ -114,7 +119,17 @@ impl TestServer {
             port,
             shutdown_tx: Some(shutdown_tx),
             handle,
+            accepted_connections,
         }
+    }
+
+    /// Number of TCP connections the server has accepted so far.
+    ///
+    /// Used by single-flight regression tests to verify a reconnect race
+    /// resulted in exactly one dial reaching the server, not a duplicate.
+    #[allow(dead_code)]
+    pub fn accepted_connection_count(&self) -> usize {
+        self.accepted_connections.load(Ordering::SeqCst)
     }
 
     /// Shuts down the server, aborting all connections.

@@ -308,12 +308,28 @@ async fn test_is_try_connect_resets_on_failed_reconnect() {
         "Should detect disconnection"
     );
 
-    // Wait for a reconnection attempt to fail (server still down)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
+    // Wait for reconnection attempts to fail (server still down).
+    //
+    // `is_try_connect` is now claimed *before* each connect attempt starts
+    // (not only after one succeeds), so it can be legitimately true for the
+    // brief span an attempt is actively dialing (bounded by
+    // `connect_timeout_seconds`) even though every attempt is failing. Poll
+    // across several retry cycles instead of asserting at one instant, to
+    // confirm the flag isn't permanently stuck true (the original bug this
+    // test guards against) rather than requiring it to be false at an
+    // arbitrary point that might land mid-dial.
+    let mut saw_false = false;
+    for _ in 0..40 {
+        if !server_sender.read().await.is_try_connect {
+            saw_false = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
     assert!(
-        !server_sender.read().await.is_try_connect,
-        "is_try_connect should reset to false after failed reconnection"
+        saw_false,
+        "is_try_connect should reset to false between failed reconnection attempts, \
+         not stay permanently true"
     );
 
     // Now start the server - should eventually reconnect
@@ -870,6 +886,87 @@ async fn test_is_try_connect_prevents_duplicate_during_active_connection() {
         )
         .await,
         "Should detect disconnection after test"
+    );
+}
+
+// ============================================================================
+// Group F: Regression - is_try_connect claimed at handshake start
+// ============================================================================
+
+/// F1: Two reconnect triggers firing concurrently (e.g. the ping-loop checker
+/// racing an app-level reconnect call) must result in only one connection
+/// attempt actually dialing the server.
+///
+/// Regression test for the 0.8.4 fix: previously `is_try_connect` was only
+/// set to `true` inside `handle_websocket`, i.e. *after* the handshake
+/// (`connect_async`) already succeeded. Two concurrent callers could both
+/// pass the (then-only) guard check and both dial `connect_async`
+/// independently, landing two live connections on the server. The fix claims
+/// the guard atomically before dialing starts, so only one of two concurrent
+/// callers should ever reach the network.
+#[tokio::test]
+async fn test_concurrent_connect_triggers_dial_only_once() {
+    let port = find_available_port().await;
+    let server = TestServer::start(port).await;
+
+    let db = create_test_db();
+    let options = ClientOptions {
+        use_ping: true,
+        url: format!("127.0.0.1:{}", port),
+        retry_seconds: 30,
+        use_keep_ip: false,
+        connect_timeout_seconds: 3,
+        atomic_websocket_type: AtomicWebsocketType::External,
+        #[cfg(feature = "rustls")]
+        use_tls: false,
+        ..Default::default()
+    };
+
+    let mut server_sender: RwServerSender = Arc::new(RwLock::new(ServerSender::new(
+        db.clone(),
+        options.url.clone(),
+        options.clone(),
+    )));
+    server_sender.regist(server_sender.clone()).await;
+
+    let client = AtomicWebsocket::get_outer_client_with_server_sender(
+        db.clone(),
+        options,
+        server_sender.clone(),
+    )
+    .await;
+
+    let mut status_rx = client.get_status_receiver().await.expect("status receiver");
+
+    // Fire two reconnect triggers concurrently — simulating e.g. the
+    // ping-loop checker and an app-level reconnect call racing during the
+    // same handshake window.
+    let (r1, r2) = tokio::join!(
+        client.get_outer_connect(db.clone()),
+        client.get_outer_connect(db.clone())
+    );
+    r1.expect("first get_outer_connect should not error");
+    r2.expect("second get_outer_connect should not error");
+
+    assert!(
+        wait_for_status(
+            &mut status_rx,
+            SenderStatus::Connected,
+            Duration::from_secs(10)
+        )
+        .await,
+        "Client should still connect despite the concurrent trigger"
+    );
+
+    // Give the loser of the race (if any) time to finish dialing/bailing
+    // before counting accepted connections.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    assert_eq!(
+        server.accepted_connection_count(),
+        1,
+        "Only one of the two concurrent reconnect triggers should have dialed the server \
+         — is_try_connect must be claimed before the handshake starts, not after it succeeds"
     );
 }
 

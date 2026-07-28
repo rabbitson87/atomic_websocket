@@ -1,5 +1,12 @@
 # Changes
 
+## 0.8.4
+
+* Fix a race that allowed two reconnect attempts to both dial the server concurrently, leading to reconnect instability under flaky/loaded connections.
+  * `is_try_connect` was only set to `true` inside `handle_websocket`, i.e. *after* the handshake (`connect_async`) already succeeded. Between "a reconnect is decided" and "handshake succeeds" there was an unguarded window (bounded by `connect_timeout_seconds`, longer under real network stress) during which independent reconnect triggers — the periodic ping-loop checker, an app-level `get_internal_connect`/`get_outer_connect` call, or `ServerSender::send`'s exhausted-retry reconnect — could each start their own connection attempt. If two landed, `ServerSender::add()` drops the *previous* sender before installing the new one, so an earlier, healthy connection could get killed out from under itself the moment a duplicate arrived.
+  * `is_try_connect` is now claimed atomically via a `TryConnectGuard` right before the handshake starts (`get_internal_websocket`/`get_outer_websocket`, and the scan-found handoff paths), not after it succeeds. A concurrent trigger during the same window now correctly no-ops instead of also dialing. The guard resets itself on drop, so a failed/timed-out handshake can no longer leave `is_try_connect` stuck `true` either (previously only the success path reset it).
+  * Added a regression test (`test_concurrent_connect_triggers_dial_only_once`) that races two concurrent reconnect triggers and asserts only one connection reaches the server; reliably reproduces the duplicate-dial bug against the pre-fix code.
+
 ## 0.8.3
 
 * Fix unbounded socket accumulation in the scan-discovery path (could exhaust the machine's ephemeral ports).

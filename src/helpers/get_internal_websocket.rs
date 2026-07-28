@@ -33,25 +33,42 @@ use super::{
     types::{save_key, RwServerSender, DB},
 };
 
-/// Guard that resets `is_try_connect` to `false` on drop.
+/// Guard that owns the `is_try_connect` single-flight lock for the lifetime of
+/// one connection attempt, and resets it to `false` on drop.
 ///
-/// Ensures the flag is always reset even if the connection handler panics,
-/// preventing permanent connection lockout.
-struct TryConnectGuard {
+/// Must be acquired via [`TryConnectGuard::try_acquire`] *before* the
+/// handshake (`connect_async`) starts, not after it succeeds — otherwise a
+/// concurrent reconnect trigger (the periodic ping-loop checker, an app-level
+/// `get_internal_connect`/`get_outer_connect` call, or `ServerSender::send`'s
+/// exhausted-retry reconnect) can slip through and start its own connection
+/// attempt during the handshake window.
+///
+/// Also ensures the flag is always reset even if the connection handler
+/// panics or exits early, preventing permanent connection lockout.
+pub(crate) struct TryConnectGuard {
     server_sender: RwServerSender,
     disarmed: bool,
 }
 
 impl TryConnectGuard {
-    fn new(server_sender: RwServerSender) -> Self {
-        Self {
+    /// Atomically claims the single-flight guard for a new connection
+    /// attempt: `false` -> `true` under one write lock. Returns `None` if a
+    /// connection attempt is already in progress.
+    pub(crate) async fn try_acquire(server_sender: RwServerSender) -> Option<Self> {
+        let mut guard = server_sender.write().await;
+        if guard.is_try_connect {
+            return None;
+        }
+        guard.is_try_connect = true;
+        drop(guard);
+        Some(Self {
             server_sender,
             disarmed: false,
-        }
+        })
     }
 
     /// Disarm the guard to prevent redundant reset on normal exit.
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.disarmed = true;
     }
 }
@@ -117,6 +134,14 @@ pub async fn get_internal_websocket(
     server_ip: String,
     options: ClientOptions,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
+    // Claim the single-flight guard *before* dialing, not after the handshake
+    // succeeds — otherwise a concurrent reconnect trigger can start its own
+    // connect_async during this window. If another attempt already owns it,
+    // there's nothing for this call to do.
+    let Some(connect_guard) = TryConnectGuard::try_acquire(server_sender.clone()).await else {
+        return Ok(());
+    };
+
     log_debug!("Connecting to {}", server_ip);
     match timeout(
         Duration::from_secs(options.connect_timeout_seconds),
@@ -131,14 +156,15 @@ pub async fn get_internal_websocket(
                 options,
                 server_ip.clone(),
                 ws_stream,
+                connect_guard,
             )
             .await
             {
-                server_sender.write().await.is_try_connect = false;
                 log_error!("Error handling websocket: {:?}", err);
             }
         }
         Err(e) => {
+            // connect_guard drops here, resetting is_try_connect automatically.
             server_sender.remove_ip_if_valid_server_ip(&server_ip).await;
             log_error!("Error connecting to {}: {:?}", server_ip, e);
         }
@@ -167,6 +193,10 @@ pub async fn get_internal_websocket(
 /// # Returns
 ///
 /// A Result indicating whether the connection handling completed successfully
+///
+/// `connect_guard` must already hold the `is_try_connect` single-flight lock
+/// (acquired by the caller before the handshake started); this function owns
+/// it for the life of the connection and disarms it on normal exit.
 #[cfg(feature = "bebop")]
 pub async fn handle_websocket(
     db: DB,
@@ -174,17 +204,8 @@ pub async fn handle_websocket(
     options: ClientOptions,
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    mut connect_guard: TryConnectGuard,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    {
-        let mut guard = server_sender.write().await;
-        if guard.is_try_connect {
-            return Ok(());
-        }
-        guard.is_try_connect = true;
-    }
-    // Safety guard: resets is_try_connect on panic or early exit
-    let mut connect_guard = TryConnectGuard::new(server_sender.clone());
-
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
@@ -314,17 +335,8 @@ pub async fn handle_websocket(
     options: ClientOptions,
     server_ip: String,
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    mut connect_guard: TryConnectGuard,
 ) -> tokio_tungstenite::tungstenite::Result<()> {
-    {
-        let mut guard = server_sender.write().await;
-        if guard.is_try_connect {
-            return Ok(());
-        }
-        guard.is_try_connect = true;
-    }
-    // Safety guard: resets is_try_connect on panic or early exit
-    let mut connect_guard = TryConnectGuard::new(server_sender.clone());
-
     let (mut ostream, mut istream) = ws_stream.split();
     log_debug!("Connected to {} for web socket", server_ip);
 
