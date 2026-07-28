@@ -15,6 +15,8 @@ use crate::generated::schema::ServerConnectInfo;
 #[cfg(feature = "bebop")]
 use bebop::Record;
 
+#[cfg(feature = "bebop")]
+use crate::helpers::server_sender::valid_port;
 #[cfg(not(feature = "bebop"))]
 use crate::helpers::common::remove_setting;
 use crate::{
@@ -165,7 +167,14 @@ impl ConnectionStore for NativeDbConnectionStore {
             let Some((_, port)) = self.get_server_connect_info().await else {
                 return;
             };
-            self.set_server_connect_info("", &port).await;
+            // Drop a port that isn't one. Before 0.9.1 `RwServerSender::add`
+            // derived it by splitting the whole `ws://host:port` URL on ':' and
+            // taking index 1, which stored the host ("//10.0.0.5"); preserving
+            // it here — the whole point of this method — is what made that
+            // value outlive the connection that produced it. Records written by
+            // an older build are still out there, so heal them on the way
+            // through instead of carrying the bad port forward forever.
+            self.set_server_connect_info("", valid_port(&port)).await;
         }
         #[cfg(not(feature = "bebop"))]
         {
@@ -247,6 +256,25 @@ mod tests {
         let (ip, port) = store.get_server_connect_info().await.unwrap();
         assert_eq!(ip, "");
         assert_eq!(port, "9000");
+    }
+
+    /// Records written by pre-0.9.1 builds carry the *host* in the port field
+    /// (`RwServerSender::add` split `ws://host:port` on ':' and took index 1).
+    /// `clear_server_ip` is the method whose entire job is to preserve the
+    /// port, so without this it preserved the corruption forever.
+    #[cfg(feature = "bebop")]
+    #[tokio::test]
+    async fn test_clear_server_ip_drops_non_numeric_port() {
+        let store = NativeDbConnectionStore::new(create_test_db());
+        store
+            .set_server_connect_info("ws://192.168.2.135:16250", "//192.168.2.135")
+            .await;
+
+        store.clear_server_ip("ws://192.168.2.135:16250").await;
+
+        let (ip, port) = store.get_server_connect_info().await.unwrap();
+        assert_eq!(ip, "");
+        assert_eq!(port, "");
     }
 
     #[cfg(not(feature = "bebop"))]

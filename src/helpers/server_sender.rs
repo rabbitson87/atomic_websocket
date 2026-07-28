@@ -34,6 +34,45 @@ use super::{
     types::RwServerSender,
 };
 
+/// Extracts the port from a stored server address.
+///
+/// Accepts both the full WebSocket URL form the library persists
+/// (`ws://10.0.0.5:16250`) and a bare `host:port`, and returns `""` when the
+/// address carries no port at all. Anything that is not a run of ASCII digits
+/// is rejected rather than passed through, because the value is persisted and
+/// later fed straight back to `ScanManager` and the reconnect path — a
+/// malformed port there is silently sticky (see `RwServerSender::add`).
+pub(crate) fn parse_port(server_address: &str) -> &str {
+    server_address
+        .trim_end_matches('/')
+        .rsplit_once(':')
+        .map(|(_, port)| valid_port(port))
+        .unwrap_or("")
+}
+
+/// Returns `port` if it is a plain run of ASCII digits, `""` otherwise.
+pub(crate) fn valid_port(port: &str) -> &str {
+    if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+        port
+    } else {
+        ""
+    }
+}
+
+#[test]
+fn test_parse_port() {
+    // The regression this was written for: the scheme's colon used to win.
+    assert_eq!(parse_port("ws://192.168.2.135:16250"), "16250");
+    assert_eq!(parse_port("wss://example.com:443/"), "443");
+    assert_eq!(parse_port("192.168.2.135:16250"), "16250");
+    assert_eq!(parse_port("ws://[::1]:16250"), "16250");
+    // No port present — must yield "", never the host.
+    assert_eq!(parse_port("ws://192.168.2.135"), "");
+    assert_eq!(parse_port("192.168.2.135"), "");
+    assert_eq!(parse_port("ws://192.168.2.135:"), "");
+    assert_eq!(parse_port(""), "");
+}
+
 /// Represents the current status of a server connection.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -344,7 +383,20 @@ impl ServerSenderTrait for RwServerSender {
         log_debug!("set start server_ip: {:?}", server_ip);
 
         // Persist to database (set_server_connect_info handles upsert internally)
-        let port = server_ip.split(':').nth(1).unwrap_or("");
+        //
+        // `server_ip` arrives here as a full WebSocket URL — "ws://10.0.0.5:16250"
+        // — from `ScanManager` and from every caller that formats it that way.
+        // Splitting the whole string on ':' and taking index 1 therefore yielded
+        // "//10.0.0.5", the *host*, because the scheme's own colon matches first.
+        // That bogus port was persisted, deliberately preserved by
+        // `clear_server_ip` on disconnect, and handed back as `connect_port` on
+        // every subsequent reconnect and `ScanManager::new` — so one successful
+        // connection was enough to poison reconnection for good.
+        //
+        // Take the last colon-separated segment instead, and only accept it if it
+        // actually looks like a port, so a URL without one ("ws://10.0.0.5")
+        // stores "" rather than "//10.0.0.5" all over again.
+        let port = parse_port(server_ip);
         connection_store.set_server_connect_info(server_ip, port).await;
     }
 

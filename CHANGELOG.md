@@ -1,5 +1,14 @@
 # Changes
 
+## 0.9.1
+
+* Fix the persisted port being set to the *host* after any successful connection, which permanently broke reconnection for that install.
+  * `RwServerSender::add` derived the port with `server_ip.split(':').nth(1)`. Since `server_ip` is a full WebSocket URL (`ws://10.0.0.5:16250`) — the form `ScanManager` produces and callers store — the scheme's own colon matched first, so index 1 was `"//10.0.0.5"`, not `16250`.
+  * That value was then persisted alongside the IP, and `clear_server_ip` (whose whole purpose is to keep the port while blanking the IP) faithfully preserved it on every disconnect. From then on the stored connect info read `("", "//10.0.0.5")`, and each reconnect handed that garbage to `ScanManager::new` and the port-reserve path. Observed in the field as a client that connects once, drops, and then retries forever without ever reconnecting.
+  * The port is now taken from the last colon-separated segment and only accepted if it is a run of ASCII digits, so an address without a port stores `""` rather than the host. IPv6 literals (`ws://[::1]:16250`) and a trailing `/` are handled.
+  * `clear_server_ip` additionally drops a non-numeric port instead of preserving it, so records already written by an older build heal on the next disconnect rather than staying poisoned.
+  * Added `test_parse_port` and `test_clear_server_ip_drops_non_numeric_port`.
+
 ## 0.9.0
 
 * **Breaking:** Decouple the client-side connection APIs from the host app's `db` handle.
