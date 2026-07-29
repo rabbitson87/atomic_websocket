@@ -18,7 +18,7 @@ use crate::helpers::{
     common::make_ping_message,
     connection_store::ConnectionStore,
     get_internal_websocket::wrap_get_internal_websocket,
-    server_sender::{SenderStatus, ServerSenderTrait},
+    server_sender::{to_ws_url, SenderStatus, ServerSenderTrait},
     traits::date_time::now,
 };
 use crate::{helpers::metrics::Metrics, log_debug, log_error, AtomicWebsocketType};
@@ -750,11 +750,18 @@ pub async fn get_internal_connect(
         // Direct connect to the known fixed server IP. No local-IP / internet
         // dependency — works on an isolated LAN with no route to the outside.
         _server_ip => {
+            // Normalized rather than dialed as-is: a stored address without a
+            // scheme (a bare IP) makes `connect_async` fail at URL-parse time,
+            // silently and without emitting any status. See `to_ws_url`.
+            // Because `handle_websocket` persists whatever address it
+            // connected with, the normalized form also replaces the malformed
+            // record on the first success.
+            let url = to_ws_url(_server_ip, &connect_port);
             server_sender.send_status(SenderStatus::Connecting).await;
             tokio::spawn(wrap_get_internal_websocket(
                 connection_store,
                 server_sender.clone(),
-                _server_ip.into(),
+                url,
                 options.clone(),
             ));
         }

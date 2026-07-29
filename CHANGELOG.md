@@ -1,5 +1,14 @@
 # Changes
 
+## 0.9.2
+
+* Normalize the stored server address before dialing, so a bare IP connects instead of silently failing.
+  * The address persisted in `ServerConnectInfo` was passed straight to `tokio_tungstenite::connect_async`, which requires a full WebSocket URL. `ScanManager` produces `ws://ip:port`, but an address that reached storage any other way — a bare IP typed into a host app's "server IP" field, or a record written by an older build — has no scheme.
+  * `connect_async` then failed at URL-parse time, *before* any `send_status` call, so the client emitted neither `Connected` nor `Disconnected`. It never connected and never reported why: observed in the field as a terminal that opened no socket at all, with every host-side retry loop waiting forever on a status transition that could not arrive.
+  * `get_internal_connect`'s direct-connect branch now runs the address through `to_ws_url`, which adds the scheme (and the port, when the address doesn't carry one) and leaves an address that is already a URL untouched — including a non-`ws` scheme. Since `handle_websocket` persists whatever address it connected with, the normalized form also replaces the malformed record on the first success.
+  * Consumers no longer need to format the address themselves before storing it.
+  * Added `test_to_ws_url`.
+
 ## 0.9.1
 
 * Fix the persisted port being set to the *host* after any successful connection, which permanently broke reconnection for that install.

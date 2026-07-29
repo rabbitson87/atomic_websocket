@@ -50,6 +50,45 @@ pub(crate) fn parse_port(server_address: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Normalizes a stored server address into something `connect_async` accepts.
+///
+/// The address persisted in `ServerConnectInfo` is handed straight to
+/// `tokio_tungstenite::connect_async`, which needs a full WebSocket URL.
+/// `ScanManager` already produces `ws://ip:port`, but an address that reached
+/// storage another way — a bare IP typed into a host app's "server IP" field,
+/// or a record written by an older build — has no scheme, and `connect_async`
+/// then fails at URL-parse time. That failure happens *before* any
+/// `send_status` call, so the client emits neither `Connected` nor
+/// `Disconnected`: it simply never connects, and every host-side retry loop
+/// waiting on a status transition waits forever. Normalizing here means each
+/// consumer no longer has to remember to format the address itself.
+pub(crate) fn to_ws_url(server_address: &str, port: &str) -> String {
+    if server_address.contains("://") {
+        return server_address.to_owned();
+    }
+    // Already carries its own port ("10.0.0.5:16250") — only the scheme is missing.
+    if !parse_port(server_address).is_empty() {
+        return format!("ws://{server_address}");
+    }
+    match valid_port(port) {
+        "" => format!("ws://{server_address}"),
+        port => format!("ws://{server_address}:{port}"),
+    }
+}
+
+#[test]
+fn test_to_ws_url() {
+    // The regression this was written for: a bare IP with the port held separately.
+    assert_eq!(to_ws_url("192.168.2.135", "16250"), "ws://192.168.2.135:16250");
+    assert_eq!(to_ws_url("192.168.2.135:16250", "16250"), "ws://192.168.2.135:16250");
+    // Already a URL — left exactly as-is, including a non-ws scheme.
+    assert_eq!(to_ws_url("ws://192.168.2.135:16250", "16250"), "ws://192.168.2.135:16250");
+    assert_eq!(to_ws_url("wss://example.com:443", ""), "wss://example.com:443");
+    // No usable port anywhere: still yields a parseable URL rather than a bare host.
+    assert_eq!(to_ws_url("192.168.2.135", ""), "ws://192.168.2.135");
+    assert_eq!(to_ws_url("192.168.2.135", "//192.168.2.135"), "ws://192.168.2.135");
+}
+
 /// Returns `port` if it is a plain run of ASCII digits, `""` otherwise.
 pub(crate) fn valid_port(port: &str) -> &str {
     if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
