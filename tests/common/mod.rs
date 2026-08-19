@@ -1,4 +1,9 @@
 //! Common test utilities for atomic_websocket integration tests.
+//!
+//! Each integration test binary compiles this module separately and uses only
+//! the part of it that it needs, so `dead_code` fires on whatever the others
+//! use. The warning carries no information here.
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

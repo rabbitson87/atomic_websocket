@@ -151,7 +151,7 @@ pub async fn get_outer_websocket(
     let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
         options.url.clone()
     } else {
-        format!("ws://{}", &options.url)
+        format!("ws://{}", options.url)
     };
     log_debug!("Connecting to WebSocket server: {:?}", &server_ip);
     if let Ok(Ok((ws_stream, _))) = timeout(

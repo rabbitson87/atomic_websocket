@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use bebop::Record;
 use dashmap::DashMap;
 use std::collections::VecDeque;
+use std::time::Duration;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 
 #[cfg(feature = "bebop")]
@@ -25,6 +27,18 @@ use crate::{
 
 use super::{common::make_expired_output_message, types::RwClientSenders};
 
+/// A received message on its way to the application: the raw payload and the
+/// peer it came from.
+type HandlerMessage = (Vec<u8>, String);
+
+/// How long `add` will wait for a replaced connection to accept its disconnect
+/// notice before giving up on it.
+///
+/// Generous for a healthy peer (the channel is drained as fast as the socket
+/// accepts bytes) and short enough that a wedged one cannot hold up the peer
+/// that is replacing it.
+const DISCONNECT_NOTICE_TIMEOUT: Duration = Duration::from_millis(200);
+
 /// Manages a collection of connected WebSocket clients on the server side.
 ///
 /// This struct maintains a DashMap of client connections for O(1) lookup and provides
@@ -34,9 +48,9 @@ pub struct ClientSenders {
     /// DashMap of connected clients (peer -> ClientSender) for O(1) lookup with fine-grained locking
     clients: DashMap<String, ClientSender>,
     /// Channel sender for passing received messages to the application
-    handle_message_sx: Sender<(Vec<u8>, String)>,
+    handle_message_sx: Sender<HandlerMessage>,
     /// Channel receiver for obtaining received messages (consumed once)
-    handle_message_rx: std::sync::Mutex<Option<Receiver<(Vec<u8>, String)>>>,
+    handle_message_rx: std::sync::Mutex<Option<Receiver<HandlerMessage>>>,
     /// Server options for connection management (interior mutability for lock-free Arc sharing)
     options: std::sync::RwLock<ServerOptions>,
     /// Metrics counters for observability
@@ -104,9 +118,45 @@ impl ClientSenders {
             peer,
             self.clients.contains_key(peer)
         );
-        if let Some(existing) = self.clients.get(peer) {
-            let _ = existing.sx.send(make_disconnect_message(peer)).await;
+
+        // Clone the previous sender and let the shard guard go *before* awaiting
+        // on it.
+        //
+        // Awaiting under the guard was a whole-store stall. The channel holds
+        // `per_connection_buffer_size` messages (8 by default) and is drained by
+        // the old connection's writer task, which is itself blocked writing to
+        // the TCP socket. A tablet that walks out of WiFi range and comes back —
+        // an ordinary event in a 48-tablet dining room, and the exact case this
+        // branch exists to handle — leaves that socket half-open until the OS
+        // gives up, minutes later. For all of those minutes the shard's lock was
+        // held. `insert`, `remove` and `check_client_send_time` need the write
+        // side of it, and dashmap's RwLock is task-fair, so every later reader —
+        // `peers()`, `len()`, `send()` — queued behind those writers too. One
+        // returning tablet stopped broadcasts to all forty-eight.
+        //
+        // `send` below already did this correctly; only `add` did not.
+        let previous = self.clients.get(peer).map(|existing| existing.sx.clone());
+        let replacing = previous.is_some();
+
+        if let Some(previous) = previous {
+            // Best effort. The point is to tell the old connection to go away,
+            // not to guarantee it hears us — if it is wedged, the notice is
+            // worthless anyway and the replacement below is what matters.
+            if timeout(
+                DISCONNECT_NOTICE_TIMEOUT,
+                previous.send(make_disconnect_message(peer)),
+            )
+            .await
+            .is_err()
+            {
+                log_error!(
+                    "Previous connection for peer {:?} did not accept the disconnect notice within {:?}; replacing it anyway",
+                    peer,
+                    DISCONNECT_NOTICE_TIMEOUT
+                );
+            }
         }
+
         self.clients.insert(
             peer.to_owned(),
             ClientSender {
@@ -115,7 +165,14 @@ impl ClientSenders {
             },
         );
         self.metrics.inc_connections_total();
-        self.metrics.inc_connections_active();
+        // Only a genuinely new peer raises the active count. Replacing one
+        // leaves the count where it was — it is still one connection. Counting
+        // it twice made `connections_active` climb on every reconnect and never
+        // come back down, which over a day of 48 tablets turned the gauge into
+        // noise.
+        if !replacing {
+            self.metrics.inc_connections_active();
+        }
     }
 
     /// Retrieves the message receiver channel.

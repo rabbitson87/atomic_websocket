@@ -170,11 +170,13 @@ async fn direct_fixed_ip_connects() {
 async fn scan_discovery_is_single_flight() {
     let (_temp, db) = make_native_db();
     let connection_store = make_connection_store(&db);
-    let mut options = ClientOptions::default();
-    options.use_scan_discovery = true;
-    // Long timeout: if the guard failed to engage, the call would enter the scan
-    // and block far beyond the 3s assertion window below.
-    options.scan_timeout_seconds = 60;
+    let options = ClientOptions {
+        use_scan_discovery: true,
+        // Long timeout: if the guard failed to engage, the call would enter the
+        // scan and block far beyond the 3s assertion window below.
+        scan_timeout_seconds: 60,
+        ..Default::default()
+    };
     let ss = make_server_sender(connection_store.clone(), options.clone()).await;
 
     // Simulate a scan already in progress.
