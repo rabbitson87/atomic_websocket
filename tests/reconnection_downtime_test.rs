@@ -78,8 +78,6 @@ async fn setup_external_client(
         use_keep_ip,
         connect_timeout_seconds: 3,
         atomic_websocket_type: AtomicWebsocketType::External,
-        #[cfg(feature = "rustls")]
-        use_tls: false,
         ..Default::default()
     };
 
@@ -128,8 +126,6 @@ async fn setup_internal_client_no_connect(
         use_keep_ip: false,
         connect_timeout_seconds: 3,
         atomic_websocket_type: AtomicWebsocketType::Internal,
-        #[cfg(feature = "rustls")]
-        use_tls: false,
         ..Default::default()
     };
 
@@ -567,8 +563,6 @@ async fn test_external_no_false_disconnect_when_never_connected() {
         use_keep_ip: false,
         connect_timeout_seconds: 3,
         atomic_websocket_type: AtomicWebsocketType::External,
-        #[cfg(feature = "rustls")]
-        use_tls: false,
         ..Default::default()
     };
 
@@ -926,8 +920,6 @@ async fn test_concurrent_connect_triggers_dial_only_once() {
         use_keep_ip: false,
         connect_timeout_seconds: 3,
         atomic_websocket_type: AtomicWebsocketType::External,
-        #[cfg(feature = "rustls")]
-        use_tls: false,
         ..Default::default()
     };
 

@@ -98,15 +98,6 @@ impl ClientOptionsBuilder {
         self
     }
 
-    /// Enables or disables TLS for secure connections.
-    ///
-    /// Only available when the `rustls` feature is enabled.
-    #[cfg(feature = "rustls")]
-    pub fn use_tls(mut self, use_tls: bool) -> Self {
-        self.options.use_tls = use_tls;
-        self
-    }
-
     /// Sets the buffer size for the incoming message handler channel (default: 256).
     pub fn handler_buffer_size(mut self, size: usize) -> Self {
         self.options.handler_buffer_size = size;

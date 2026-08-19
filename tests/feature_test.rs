@@ -109,27 +109,12 @@ mod in_memory_tests {
 // ============================================================================
 // Rustls Feature Tests
 // ============================================================================
-
-#[cfg(feature = "rustls")]
-mod rustls_tests {
-    use atomic_websocket::server_sender::ClientOptions;
-    use atomic_websocket::AtomicWebsocketType;
-
-    #[test]
-    fn test_client_options_tls_default() {
-        let options = ClientOptions::default();
-        assert!(options.use_tls);
-    }
-
-    #[test]
-    fn test_client_options_tls_disabled() {
-        let options = ClientOptions {
-            url: "example.com".to_string(),
-            atomic_websocket_type: AtomicWebsocketType::External,
-            use_tls: false,
-            ..Default::default()
-        };
-
-        assert!(!options.use_tls);
-    }
-}
+//
+// There used to be two tests here for `ClientOptions::use_tls`. Both set the
+// field and then asserted it held what they had put in it — neither ever
+// checked that it changed a connection. It changed nothing: the dialer read the
+// scheme off the URL and never looked at the field. The tests passed for years
+// while the option did nothing, which is how it survived.
+//
+// The scheme rule that actually decides TLS is pinned in
+// `get_outer_websocket::outer_ws_url_tests`, against the function that does it.

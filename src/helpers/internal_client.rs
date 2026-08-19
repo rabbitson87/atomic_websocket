@@ -37,7 +37,17 @@ pub struct ClientOptions {
     /// Whether to enable automatic ping/pong for connection health monitoring
     pub use_ping: bool,
 
-    /// Server URL for external connections
+    /// Server URL for external connections.
+    ///
+    /// **The scheme here is what selects TLS.** Give `ws://` for plaintext or
+    /// `wss://` for TLS and it is used as written. A URL with no scheme is
+    /// filled in from the build: `wss://` when the `rustls` feature is on,
+    /// `ws://` when it is not.
+    ///
+    /// Be explicit. A scheme-less address that works in one build silently
+    /// changes protocol in the other, and the failure that follows is a TLS
+    /// handshake error against a plaintext server, which reads like a
+    /// certificate problem rather than a URL problem.
     pub url: String,
 
     /// Time in seconds between reconnection attempts
@@ -52,10 +62,6 @@ pub struct ClientOptions {
     /// AtomicWebsocketType for managing connection types
     /// (internal or external)
     pub atomic_websocket_type: AtomicWebsocketType,
-
-    /// Whether to use TLS for secure connections (only available with rustls feature)
-    #[cfg(feature = "rustls")]
-    pub use_tls: bool,
 
     /// Buffer size for the incoming message handler channel (default: 256)
     pub handler_buffer_size: usize,
@@ -96,8 +102,6 @@ impl Default for ClientOptions {
             use_keep_ip: false,
             connect_timeout_seconds: 3,
             atomic_websocket_type: AtomicWebsocketType::Internal,
-            #[cfg(feature = "rustls")]
-            use_tls: true,
             handler_buffer_size: 256,
             status_buffer_size: 8,
             per_connection_buffer_size: 8,
@@ -190,14 +194,20 @@ impl AtomicClient {
     ///
     /// `true` if a server was found and a connection was started, `false`
     /// otherwise (timeout, already connecting, or no local network).
-    pub async fn scan_and_connect(&self, port: &str, connection_store: Arc<dyn ConnectionStore>) -> bool {
+    pub async fn scan_and_connect(
+        &self,
+        port: &str,
+        connection_store: Arc<dyn ConnectionStore>,
+    ) -> bool {
         // Respect the same duplicate-connection guard as the normal path.
         if !self.server_sender.is_need_connect().await {
             return false;
         }
         // Already connected — nothing to do.
         if self.server_sender.is_valid_server_ip().await {
-            self.server_sender.send_status(SenderStatus::Connected).await;
+            self.server_sender
+                .send_status(SenderStatus::Connected)
+                .await;
             return true;
         }
         // Single-flight: don't stack a second scan on top of an in-progress one.
@@ -211,11 +221,15 @@ impl AtomicClient {
         // Scanning needs the local subnet to build the candidate list.
         if get_ip_address().is_empty() {
             self.server_sender.write().await.is_scanning = false;
-            self.server_sender.send_status(SenderStatus::Disconnected).await;
+            self.server_sender
+                .send_status(SenderStatus::Disconnected)
+                .await;
             return false;
         }
 
-        self.server_sender.send_status(SenderStatus::Connecting).await;
+        self.server_sender
+            .send_status(SenderStatus::Connecting)
+            .await;
 
         let mut manager = ScanManager::new(port);
         let scan_timeout = Duration::from_secs(self.options.scan_timeout_seconds.max(1));
@@ -256,7 +270,9 @@ impl AtomicClient {
                 true
             }
             None => {
-                self.server_sender.send_status(SenderStatus::Disconnected).await;
+                self.server_sender
+                    .send_status(SenderStatus::Disconnected)
+                    .await;
                 false
             }
         }
@@ -275,7 +291,12 @@ impl AtomicClient {
         &self,
         connection_store: Arc<dyn ConnectionStore>,
     ) -> Result<(), Box<dyn Error>> {
-        get_outer_connect(connection_store, self.server_sender.clone(), self.options.clone()).await
+        get_outer_connect(
+            connection_store,
+            self.server_sender.clone(),
+            self.options.clone(),
+        )
+        .await
     }
 
     /// Initiates a connection to an internal server.
@@ -814,7 +835,9 @@ pub async fn get_internal_connect(
     // Use local network discovery, bounded so it cannot run forever.
     server_sender.send_status(SenderStatus::Connecting).await;
     let scan_timeout = Duration::from_secs(options.scan_timeout_seconds.max(1));
-    let found = ScanManager::new("9000").run_with_timeout(scan_timeout).await;
+    let found = ScanManager::new("9000")
+        .run_with_timeout(scan_timeout)
+        .await;
 
     server_sender.write().await.is_scanning = false;
 
@@ -899,13 +922,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "rustls")]
-    #[test]
-    fn test_client_options_default_with_tls() {
-        let options = ClientOptions::default();
-        assert!(options.use_tls);
-    }
-
     #[test]
     fn test_client_options_clone() {
         let options = ClientOptions {
@@ -915,8 +931,6 @@ mod tests {
             use_keep_ip: true,
             connect_timeout_seconds: 10,
             atomic_websocket_type: AtomicWebsocketType::External,
-            #[cfg(feature = "rustls")]
-            use_tls: false,
             ..Default::default()
         };
 
@@ -941,8 +955,6 @@ mod tests {
             use_keep_ip: true,
             connect_timeout_seconds: 1,
             atomic_websocket_type: AtomicWebsocketType::Internal,
-            #[cfg(feature = "rustls")]
-            use_tls: true,
             ..Default::default()
         };
 

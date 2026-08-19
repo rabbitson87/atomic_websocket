@@ -60,7 +60,9 @@ async fn test_server_accepts_connection() {
     let ws_url = format!("ws://127.0.0.1:{}", port);
 
     let options = ServerOptions::default();
-    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options).await.unwrap();
+    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -76,7 +78,9 @@ async fn test_multiple_reconnections() {
     let ws_url = format!("ws://127.0.0.1:{}", port);
 
     let options = ServerOptions::default();
-    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options).await.unwrap();
+    let _server = AtomicWebsocket::get_internal_server(addr.clone(), options)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -119,8 +123,6 @@ fn test_client_options_clone() {
         use_keep_ip: true,
         connect_timeout_seconds: 5,
         atomic_websocket_type: atomic_websocket::AtomicWebsocketType::External,
-        #[cfg(feature = "rustls")]
-        use_tls: true,
         ..Default::default()
     };
 

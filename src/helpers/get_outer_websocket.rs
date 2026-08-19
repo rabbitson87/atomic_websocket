@@ -20,6 +20,32 @@ use tokio::time::timeout;
 
 use crate::log_debug;
 
+/// Resolves the URL this client should dial.
+///
+/// A URL that names its own scheme is used exactly as written — that is the
+/// supported way to choose between plaintext and TLS, and it is why there is no
+/// `use_tls` option: the address already says which one it is.
+///
+/// A scheme-less address is completed from the build, `wss://` with the
+/// `rustls` feature and `ws://` without it. That default exists for
+/// convenience, but relying on it means the same configuration speaks a
+/// different protocol depending on how the binary was compiled, and the symptom
+/// — a TLS handshake error against a plaintext server — points at certificates
+/// rather than at the address. Callers should name the scheme.
+pub(crate) fn outer_ws_url(url: &str) -> String {
+    if url.starts_with("ws://") || url.starts_with("wss://") {
+        return url.to_owned();
+    }
+    #[cfg(feature = "rustls")]
+    {
+        format!("wss://{url}")
+    }
+    #[cfg(not(feature = "rustls"))]
+    {
+        format!("ws://{url}")
+    }
+}
+
 /// Wrapper function for establishing an external WebSocket connection.
 ///
 /// Handles errors from the connection attempt and logs them appropriately.
@@ -74,12 +100,7 @@ pub async fn get_outer_websocket(
         return Ok(());
     };
 
-    // Format the URL with 'wss://' scheme for secure WebSockets
-    let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
-        options.url.clone()
-    } else {
-        format!("wss://{}", &options.url)
-    };
+    let server_ip = outer_ws_url(&options.url);
 
     // Configure TLS with root certificates from webpki-roots
     let root_store = RootCertStore {
@@ -147,12 +168,7 @@ pub async fn get_outer_websocket(
         return Ok(());
     };
 
-    // Format the URL with 'ws://' scheme for standard WebSockets
-    let server_ip = if options.url.starts_with("ws://") || options.url.starts_with("wss://") {
-        options.url.clone()
-    } else {
-        format!("ws://{}", options.url)
-    };
+    let server_ip = outer_ws_url(&options.url);
     log_debug!("Connecting to WebSocket server: {:?}", &server_ip);
     if let Ok(Ok((ws_stream, _))) = timeout(
         Duration::from_secs(options.connect_timeout_seconds),
@@ -175,4 +191,31 @@ pub async fn get_outer_websocket(
     log_debug!("Failed to server connect to {}", server_ip);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod outer_ws_url_tests {
+    use super::outer_ws_url;
+
+    #[test]
+    fn an_explicit_scheme_is_never_overridden() {
+        // Both directions, under either feature: what the caller wrote stands.
+        assert_eq!(outer_ws_url("ws://10.0.0.5:9000"), "ws://10.0.0.5:9000");
+        assert_eq!(
+            outer_ws_url("wss://license.jkpos365.com"),
+            "wss://license.jkpos365.com"
+        );
+    }
+
+    #[cfg(feature = "rustls")]
+    #[test]
+    fn a_scheme_less_address_defaults_to_tls_under_rustls() {
+        assert_eq!(outer_ws_url("10.0.0.5:9000"), "wss://10.0.0.5:9000");
+    }
+
+    #[cfg(not(feature = "rustls"))]
+    #[test]
+    fn a_scheme_less_address_defaults_to_plaintext_without_rustls() {
+        assert_eq!(outer_ws_url("10.0.0.5:9000"), "ws://10.0.0.5:9000");
+    }
 }
