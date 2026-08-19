@@ -73,7 +73,7 @@ async fn setup_external_client(
     let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
-        url: format!("127.0.0.1:{}", port),
+        url: format!("ws://127.0.0.1:{}", port),
         retry_seconds,
         use_keep_ip,
         connect_timeout_seconds: 3,
@@ -123,7 +123,7 @@ async fn setup_internal_client_no_connect(
     let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
-        url: format!("127.0.0.1:{}", port),
+        url: format!("ws://127.0.0.1:{}", port),
         retry_seconds,
         use_keep_ip: false,
         connect_timeout_seconds: 3,
@@ -562,7 +562,7 @@ async fn test_external_no_false_disconnect_when_never_connected() {
     let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
-        url: format!("127.0.0.1:{}", port),
+        url: format!("ws://127.0.0.1:{}", port),
         retry_seconds: 2,
         use_keep_ip: false,
         connect_timeout_seconds: 3,
@@ -921,7 +921,7 @@ async fn test_concurrent_connect_triggers_dial_only_once() {
     let connection_store = create_connection_store(&db);
     let options = ClientOptions {
         use_ping: true,
-        url: format!("127.0.0.1:{}", port),
+        url: format!("ws://127.0.0.1:{}", port),
         retry_seconds: 30,
         use_keep_ip: false,
         connect_timeout_seconds: 3,
