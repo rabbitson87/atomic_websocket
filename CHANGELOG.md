@@ -1,5 +1,16 @@
 # Changes
 
+## 0.9.7
+
+### Fixed
+
+- The connection-cap refusal logged the wrong number. It added the free
+  permits (zero, by definition, at a refusal) to the count of peers that had
+  finished registering, so it printed whatever happened to be connected at
+  that instant — "already at the 72 connection cap" on a server configured
+  for 128, and a different number each time. It now prints the configured
+  cap, which is the thing an operator can go and change.
+
 ## 0.9.6
 
 ### Added

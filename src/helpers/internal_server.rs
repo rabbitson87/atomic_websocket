@@ -181,6 +181,7 @@ impl AtomicServer {
                     cancel_token.clone(),
                     acceptor,
                     slots.clone(),
+                    option.max_connections,
                 ));
             }
         } else {
@@ -189,6 +190,7 @@ impl AtomicServer {
                 client_senders.clone(),
                 cancel_token.clone(),
                 slots.clone(),
+                option.max_connections,
             ));
         }
 
@@ -302,6 +304,7 @@ pub async fn handle_accept(
     client_senders: RwClientSenders,
     cancel_token: CancellationToken,
     slots: Arc<tokio::sync::Semaphore>,
+    max_connections: usize,
 ) {
     loop {
         tokio::select! {
@@ -321,10 +324,17 @@ pub async fn handle_accept(
                         };
                         log_debug!("Peer address: {}", peer);
                         let Ok(permit) = slots.clone().try_acquire_owned() else {
+                            // The configured cap, not a count derived at the
+                            // moment of refusal. The first version added the
+                            // free permits (zero, by definition, here) to the
+                            // registered peer count, which printed whatever
+                            // had finished its handshake so far — a different
+                            // number every time, and never the setting anyone
+                            // could go and change.
                             log_error!(
                                 "Refusing {}: already at the {} connection cap",
                                 peer,
-                                slots.available_permits() + client_senders.len()
+                                max_connections
                             );
                             // Dropping the stream closes it, which is the
                             // answer the client can act on. Queueing here
@@ -358,6 +368,7 @@ pub async fn handle_accept_tls(
     cancel_token: CancellationToken,
     tls_acceptor: tokio_rustls::TlsAcceptor,
     slots: Arc<tokio::sync::Semaphore>,
+    max_connections: usize,
 ) {
     loop {
         tokio::select! {
@@ -381,8 +392,9 @@ pub async fn handle_accept_tls(
                         // callers could otherwise pile on.
                         let Ok(permit) = slots.clone().try_acquire_owned() else {
                             log_error!(
-                                "Refusing {} (TLS): already at the connection cap",
-                                peer
+                                "Refusing {} (TLS): already at the {} connection cap",
+                                peer,
+                                max_connections
                             );
                             drop(stream);
                             continue;
