@@ -1,5 +1,20 @@
 # Changes
 
+## 0.9.4
+
+* **Breaking:** Remove `ClientOptions::use_tls` (and `ClientOptionsBuilder::use_tls`) — it was written by the builder and read by nobody. TLS on the outer client has always been chosen by the URL scheme, with a scheme-less address defaulting from the `rustls` feature; setting the field did nothing.
+  * The scheme rule is now a named function, `outer_ws_url`, shared by both `get_outer_websocket` implementations instead of being written out twice. `ClientOptions::url` documents it directly: give `ws://`/`wss://` explicitly, since a scheme-less address silently speaks a different protocol depending on how the binary was compiled, and the resulting failure — a TLS handshake error against a plaintext server — reads like a certificate problem rather than an address problem.
+  * No consumer sets `use_tls` today, so nothing outside this repo has to change; the field simply no longer exists.
+  * Added `outer_ws_url_tests`, pinning both directions: an explicit scheme survives untouched, a scheme-less one picks up the build's default.
+
+## 0.9.3
+
+* Fix one reconnecting client freezing broadcasts to every other connected client.
+  * `ClientSenders::add` replaces an existing connection and, on the way, notifies the old one to disconnect — but it did that *while holding the DashMap shard's write lock*, awaiting a bounded channel that only the old connection's writer task drains. When a client walks out of WiFi range and comes back (an ordinary event, not an edge case, in a room full of tablets), the old socket is half-open: its writer is blocked in `send`, the 8-slot channel fills, and the notice never lands until the OS gives up on the socket minutes later — with the shard lock held for all of it. Since dashmap's `RwLock` is task-fair, every later reader queued behind that held write lock too, including `peers()`, where every broadcast starts. One returning client stopped broadcasts to all of them.
+  * `add` now clones the previous sender, drops the shard guard, and only then sends the disconnect notice under a 200ms timeout — best-effort, since a wedged peer's notice is worthless anyway and the replacement landing is what actually matters.
+  * Also stopped `connections_active` from climbing on every reconnect of the same peer and never coming back down; a replacement is not a new connection.
+  * Added `tests/reconnect_blocking_test.rs`, which reproduces all three failure modes with no server or client needed — a channel nobody drains is a faithful stand-in for a socket nobody reads.
+
 ## 0.9.2
 
 * Normalize the stored server address before dialing, so a bare IP connects instead of silently failing.
