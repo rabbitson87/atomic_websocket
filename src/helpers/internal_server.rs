@@ -86,6 +86,21 @@ pub struct ServerOptions {
     /// blocking. Messages are dropped only when this buffer also reaches its cap.
     pub spillover_buffer_size: usize,
 
+    /// Most connections accepted at once (default: 512).
+    ///
+    /// A permit is held for the life of a connection and released when it
+    /// ends, so this bounds sockets in flight rather than connections per
+    /// second. Over the cap the TCP connection is closed immediately instead
+    /// of being queued: a client that cannot be served should find out now
+    /// and retry, not hold a socket open waiting for a slot.
+    ///
+    /// The default is far above any real deployment of ours — a 48-tablet
+    /// store settles around fifty — because the point is to stop unbounded
+    /// growth, not to ration. Before this there was no bound at all: every
+    /// accepted socket spawned a task, so anything opening connections
+    /// faster than they closed grew until the process died.
+    pub max_connections: usize,
+
     /// Middleware chain for intercepting WebSocket events.
     /// Middlewares are called in order; if any returns `Stop` on a message, it is dropped.
     pub middlewares: Vec<Arc<dyn MessageMiddleware>>,
@@ -107,6 +122,7 @@ impl Default for ServerOptions {
             per_connection_buffer_size: 8,
             handler_buffer_size: 1024,
             spillover_buffer_size: 1024,
+            max_connections: 512,
             middlewares: Vec::new(),
             #[cfg(feature = "rustls")]
             tls_config: None,
@@ -152,6 +168,9 @@ impl AtomicServer {
 
         client_senders.set_options(option.clone());
 
+        // Held for the life of each connection. See `max_connections`.
+        let slots = Arc::new(tokio::sync::Semaphore::new(option.max_connections));
+
         if use_tls {
             #[cfg(feature = "rustls")]
             if let Some(tls_config) = option.tls_config {
@@ -161,6 +180,7 @@ impl AtomicServer {
                     client_senders.clone(),
                     cancel_token.clone(),
                     acceptor,
+                    slots.clone(),
                 ));
             }
         } else {
@@ -168,6 +188,7 @@ impl AtomicServer {
                 listener,
                 client_senders.clone(),
                 cancel_token.clone(),
+                slots.clone(),
             ));
         }
 
@@ -280,6 +301,7 @@ pub async fn handle_accept(
     listener: TcpListener,
     client_senders: RwClientSenders,
     cancel_token: CancellationToken,
+    slots: Arc<tokio::sync::Semaphore>,
 ) {
     loop {
         tokio::select! {
@@ -298,7 +320,24 @@ pub async fn handle_accept(
                             }
                         };
                         log_debug!("Peer address: {}", peer);
-                        tokio::spawn(accept_connection(client_senders.clone(), peer, stream));
+                        let Ok(permit) = slots.clone().try_acquire_owned() else {
+                            log_error!(
+                                "Refusing {}: already at the {} connection cap",
+                                peer,
+                                slots.available_permits() + client_senders.len()
+                            );
+                            // Dropping the stream closes it, which is the
+                            // answer the client can act on. Queueing here
+                            // would leave it waiting on a slot that may
+                            // never come.
+                            drop(stream);
+                            continue;
+                        };
+                        let cs = client_senders.clone();
+                        tokio::spawn(async move {
+                            accept_connection(cs, peer, stream).await;
+                            drop(permit);
+                        });
                     }
                     Err(e) => {
                         log_error!("Error accepting connection: {:?}", e);
@@ -318,6 +357,7 @@ pub async fn handle_accept_tls(
     client_senders: RwClientSenders,
     cancel_token: CancellationToken,
     tls_acceptor: tokio_rustls::TlsAcceptor,
+    slots: Arc<tokio::sync::Semaphore>,
 ) {
     loop {
         tokio::select! {
@@ -336,6 +376,17 @@ pub async fn handle_accept_tls(
                             }
                         };
                         log_debug!("Peer address (TLS): {}", peer);
+                        // Taken before the handshake, not after: the
+                        // handshake itself is work an unbounded number of
+                        // callers could otherwise pile on.
+                        let Ok(permit) = slots.clone().try_acquire_owned() else {
+                            log_error!(
+                                "Refusing {} (TLS): already at the connection cap",
+                                peer
+                            );
+                            drop(stream);
+                            continue;
+                        };
                         let acceptor = tls_acceptor.clone();
                         let cs = client_senders.clone();
                         tokio::spawn(async move {
@@ -347,6 +398,7 @@ pub async fn handle_accept_tls(
                                     log_error!("TLS handshake failed for {}: {:?}", peer, e);
                                 }
                             }
+                            drop(permit);
                         });
                     }
                     Err(e) => {

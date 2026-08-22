@@ -214,6 +214,16 @@ impl ServerOptionsBuilder {
         self
     }
 
+    /// Sets the most connections accepted at once (default: 512).
+    ///
+    /// Over the cap the TCP connection is closed rather than queued. Size it
+    /// above the devices you expect plus room for reconnects overlapping the
+    /// connections they replace, not exactly at the device count.
+    pub fn max_connections(mut self, max: usize) -> Self {
+        self.options.max_connections = max;
+        self
+    }
+
     /// Sets the maximum spillover buffer size for handler messages (default: 1024).
     ///
     /// When the handler channel is full, messages are buffered here instead of

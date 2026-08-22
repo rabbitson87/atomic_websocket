@@ -1,5 +1,22 @@
 # Changes
 
+## 0.9.6
+
+### Added
+
+- `ServerOptions::max_connections` (default 512), a cap on connections
+  accepted at once. A permit is held for the life of a connection and
+  released when it ends, so this bounds sockets in flight rather than
+  connections per second. Over the cap the TCP connection is closed rather
+  than queued — a client that cannot be served should find out now and retry
+  instead of holding a socket open waiting for a slot. Also on
+  `ServerOptionsBuilder`.
+
+  There was no bound before: every accepted socket spawned a task, so
+  anything opening connections faster than they closed grew until the
+  process died. The TLS path takes its permit before the handshake, since
+  the handshake is itself work an unbounded number of callers could pile on.
+
 ## 0.9.5
 
 ### Fixed
