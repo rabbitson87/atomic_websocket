@@ -1,5 +1,23 @@
 # Changes
 
+## 0.9.5
+
+### Fixed
+
+- `ClientSenders::send` no longer waits without a deadline. The channel is
+  bounded and is drained by the connection's writer task; when that task is
+  blocked writing to a socket, `send().await` waited for capacity that could
+  not arrive until the OS gave up on the socket — minutes, for a device that
+  left WiFi mid-session. `send_all` joins across every peer, so one
+  unreachable client held up every broadcast for that whole time. Sends now
+  give up after 2s and the peer is dropped.
+
+- The exponential backoff around that send is gone. A bounded `Sender` only
+  errors once its receiver has been dropped, and a dropped receiver does not
+  come back, so all five retries were guaranteed to fail — they added about
+  two seconds before returning the answer the first attempt already had. It
+  also never covered the case above, where the send does not error at all.
+
 ## 0.9.4
 
 * **Breaking:** Remove `ClientOptions::use_tls` (and `ClientOptionsBuilder::use_tls`) — it was written by the builder and read by nobody. TLS on the outer client has always been chosen by the URL scheme, with a scheme-less address defaulting from the `rustls` feature; setting the field did nothing.

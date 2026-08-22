@@ -19,8 +19,7 @@ use std::sync::Arc;
 use crate::{
     client_sender::ServerOptions,
     helpers::{
-        common::make_disconnect_message, metrics::Metrics, retry::ExponentialBackoff,
-        traits::date_time::now,
+        common::make_disconnect_message, metrics::Metrics, traits::date_time::now,
     },
     log_debug, log_error,
 };
@@ -38,6 +37,13 @@ type HandlerMessage = (Vec<u8>, String);
 /// accepts bytes) and short enough that a wedged one cannot hold up the peer
 /// that is replacing it.
 const DISCONNECT_NOTICE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long a single peer may hold up a message before it is considered gone.
+///
+/// Long enough that a tablet briefly behind on its buffer is not dropped for
+/// it; short enough that `send_all` cannot be held open by one unreachable
+/// device. The alternative — no bound — is what this replaced.
+const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Manages a collection of connected WebSocket clients on the server side.
 ///
@@ -326,6 +332,27 @@ impl ClientSenders {
     /// # Complexity
     ///
     /// O(1) average case for DashMap lookup
+    /// Queues `message` for `peer`, giving up after [`SEND_TIMEOUT`].
+    ///
+    /// Returning `false` means the caller should treat the peer as gone;
+    /// `ClientSendersTrait::send` removes it.
+    ///
+    /// This used to retry with exponential backoff, which could not help with
+    /// either thing that goes wrong here.
+    ///
+    /// The channel is bounded, so `Sender::send` only fails once the receiver
+    /// is dropped — and a dropped receiver does not come back. Every retry was
+    /// guaranteed to fail, and the five of them took about two seconds to
+    /// arrive at the answer the first attempt already had.
+    ///
+    /// The case it never covered is the one that matters: a full buffer whose
+    /// receiver is still alive. `send().await` then waits for capacity, and
+    /// capacity is freed by the writer task, which is blocked writing to the
+    /// socket. A tablet that leaves WiFi mid-service holds a half-open socket
+    /// until the OS gives up minutes later, so the wait had no bound at all.
+    /// `send_all` joins across every peer, so it did not return until that
+    /// one tablet's write completed — one tablet out of range stopped every
+    /// broadcast to the other forty-seven for as long as it took.
     pub async fn send(&self, peer: &str, message: Message) -> bool {
         let sender = {
             let Some(client) = self.clients.get(peer) else {
@@ -333,26 +360,16 @@ impl ClientSenders {
             };
             client.sx.clone()
         };
-        let mut backoff = ExponentialBackoff::default();
 
-        loop {
-            match sender.send(message.clone()).await {
-                Ok(_) => {
-                    self.metrics.inc_messages_sent();
-                    return true;
-                }
-                Err(e) => {
-                    log_error!(
-                        "Error sending message (attempt {}): {:?}",
-                        backoff.count() + 1,
-                        e
-                    );
-                    if !backoff.wait().await {
-                        self.metrics.inc_send_errors();
-                        log_error!("Failed to send after {} retries", backoff.count());
-                        return false;
-                    }
-                }
+        match sender.send_timeout(message, SEND_TIMEOUT).await {
+            Ok(_) => {
+                self.metrics.inc_messages_sent();
+                true
+            }
+            Err(e) => {
+                self.metrics.inc_send_errors();
+                log_error!("Dropping peer {:?}: {:?}", peer, e);
+                false
             }
         }
     }
