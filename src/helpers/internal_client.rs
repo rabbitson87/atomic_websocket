@@ -11,7 +11,9 @@ use std::time::Duration;
 
 #[cfg(feature = "bebop")]
 use crate::generated::schema::ServerConnectInfo;
-use crate::helpers::get_internal_websocket::{handle_websocket, TryConnectGuard};
+use crate::helpers::get_internal_websocket::{
+    handle_websocket, TryConnectGuard, FINAL_FLUSH, STOP_NOTICE,
+};
 use crate::helpers::get_outer_websocket::wrap_get_outer_websocket;
 use crate::helpers::scan_manager::ScanManager;
 use crate::helpers::{
@@ -437,58 +439,168 @@ async fn internal_ping_loop_cheker(
             }
             _ = tokio::time::sleep(Duration::from_secs(current_retry_seconds)) => {}
         }
-        let server_sender_read = server_sender.read().await;
-
-        // Check if connection is dead (no messages received for 4x retry period)
-        if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 4)
-                < now().timestamp()
-        {
-            drop(server_sender_read);
-            server_sender.send_status(SenderStatus::Disconnected).await;
-
-            // Clear server IP and stored connection info if not keeping it
-            if !use_keep_ip {
-                server_sender.remove_ip_if_valid_server_ip("").await;
-            }
-
-            // Attempt reconnection with exponential backoff
-            server_sender.send_status(SenderStatus::Reconnecting).await;
-            let (metrics, connection_store) = {
-                let guard = server_sender.read().await;
-                (guard.metrics.clone(), guard.connection_store.clone())
-            };
-            metrics.inc_reconnections();
-            let server_sender = server_sender.clone();
-            let options = options.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    get_internal_connect(None, connection_store, server_sender, options).await
-                {
-                    log_error!("Internal reconnection failed: {:?}", e);
+        // Judged and taken down under the one lock: a connection registered
+        // between a verdict and the drop would otherwise be the one dropped.
+        //
+        // The connection comes down either way. Left standing it goes on
+        // holding the single-flight flag, and every reconnect below would be
+        // turned away by it. What `use_keep_ip` decides is whether the
+        // address goes with it — and, for a client that cannot tell a quiet
+        // link from a dead one, whether silence is acted on at all (see
+        // `silence_is_evidence`).
+        let (silence, connection_store) = {
+            let mut guard = server_sender.write().await;
+            let silence = judge_silence(
+                guard.server_received_times,
+                guard.connected_at,
+                retry_seconds as i64,
+                now().timestamp(),
+            );
+            if silence == Silence::Dead {
+                if !use_keep_ip {
+                    guard.remove_ip();
+                } else if silence_is_evidence(&options) {
+                    guard.drop_connection();
                 }
-            });
-
-            // Exponential backoff: double the retry interval (capped at 8x base)
-            current_retry_seconds = (current_retry_seconds * 2).min(max_retry_seconds);
-        }
-        // Send a ping if no messages for 2x retry period
-        else if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 2)
-                < now().timestamp()
-        {
-            if options.use_ping {
-                log_debug!("Try ping from loop checker");
-                let connection_store = server_sender_read.connection_store.clone();
-                drop(server_sender_read);
-                let id: String = connection_store.get_client_id().await;
-                server_sender.send(make_ping_message(&id)).await;
             }
-        } else {
-            // Connection is alive — reset reconnection backoff
-            current_retry_seconds = retry_seconds;
+            (silence, guard.connection_store.clone())
+        };
+
+        match silence {
+            Silence::Dead => {
+                server_sender.send_status(SenderStatus::Disconnected).await;
+
+                // The stored half of forgetting the address.
+                if !use_keep_ip {
+                    connection_store.clear_server_ip("").await;
+                }
+
+                // Attempt reconnection with exponential backoff
+                server_sender.send_status(SenderStatus::Reconnecting).await;
+                let metrics = server_sender.read().await.metrics.clone();
+                metrics.inc_reconnections();
+                let server_sender = server_sender.clone();
+                let options = options.clone();
+                tokio::spawn(async move {
+                    wait_for_teardown(&server_sender).await;
+                    if let Err(e) =
+                        get_internal_connect(None, connection_store, server_sender, options).await
+                    {
+                        log_error!("Internal reconnection failed: {:?}", e);
+                    }
+                });
+
+                // Exponential backoff: double the retry interval (capped at 8x base)
+                current_retry_seconds = (current_retry_seconds * 2).min(max_retry_seconds);
+            }
+            Silence::Quiet => {
+                if options.use_ping {
+                    log_debug!("Try ping from loop checker");
+                    let id: String = connection_store.get_client_id().await;
+                    // With a deadline. A connection whose writer is parked on
+                    // a socket that has stopped taking writes has a full
+                    // queue, and a ping that waited for room in it would
+                    // keep this loop from ever reaching "dead".
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(retry_seconds),
+                        server_sender.send(make_ping_message(&id)),
+                    )
+                    .await;
+                }
+            }
+            // A connection that has been made and not heard from yet: too
+            // young to call dead, and no reason to forget how often the ones
+            // before it failed.
+            Silence::Unproven => {}
+            Silence::Alive => {
+                // Connection is alive — reset reconnection backoff
+                current_retry_seconds = retry_seconds;
+            }
         }
         log_debug!("loop server checker finish");
+    }
+}
+
+/// What the checker makes of how long a connection has been quiet.
+#[derive(Debug, PartialEq, Eq)]
+enum Silence {
+    /// Heard from recently, or never connected at all.
+    Alive,
+    /// Made since the last message arrived, and not heard from yet.
+    Unproven,
+    /// Two retry periods without a message: worth a ping.
+    Quiet,
+    /// Four: take it down and dial again.
+    Dead,
+}
+
+/// Judges a connection's silence at `now`.
+///
+/// `last_received` is the last message from the server on *any* connection;
+/// `connected_at` is when the current one was registered. The silence is
+/// counted from the later of the two. Without that, a connection made a
+/// moment ago would be judged by the previous one's last message — dead on
+/// arrival, and taken down before its first pong.
+///
+/// A client that has never heard from a server has no connection to call
+/// dead, however long it has been.
+///
+/// A `connected_at` later than `now` is not believed. It means the clock was
+/// set back after the connection was registered, and unlike the receive
+/// stamp nothing ever refreshes it: taken at its word it would keep a dead
+/// connection "just made" until the clock caught up with it.
+fn judge_silence(last_received: i64, connected_at: i64, retry_seconds: i64, now: i64) -> Silence {
+    if last_received <= 0 {
+        return Silence::Alive;
+    }
+    let connected_at = if connected_at > now { 0 } else { connected_at };
+    let quiet_since = last_received.max(connected_at);
+    if quiet_since + retry_seconds * 4 < now {
+        Silence::Dead
+    } else if quiet_since + retry_seconds * 2 < now {
+        Silence::Quiet
+    } else if connected_at > last_received {
+        Silence::Unproven
+    } else {
+        Silence::Alive
+    }
+}
+
+/// Whether a silent link says anything about the link.
+///
+/// It does for a client that pings and is answered: a link that returns no
+/// pong is not carrying traffic. A client that does not ping — `use_ping`
+/// off, or a build without `bebop`, which has no pong to wait for — hears
+/// nothing on a healthy link that simply has nothing to say. Taking such a
+/// connection down on silence alone would recycle a working link every few
+/// retry periods, so for a client that keeps its address it is left as it
+/// was before 0.9.8: reported, not touched.
+fn silence_is_evidence(options: &ClientOptions) -> bool {
+    cfg!(feature = "bebop") && options.use_ping
+}
+
+/// How long a reconnect waits for the connection it replaces to let go.
+///
+/// The checker drops a dead connection and spawns the dial in the same
+/// breath, but the connection needs a moment to wind down — a write that was
+/// in flight, what is left in its queue with the goodbye, its final flush,
+/// and the moment it gives the server to hang up first, each with its own
+/// deadline in `handle_websocket` — before it releases the single-flight
+/// flag. A dial that arrives first is turned
+/// away, and the next one is a whole backoff step later. Not an option: it
+/// is those deadlines and a little room, not anything a deployment chooses.
+const TEARDOWN_WAIT: Duration = STOP_NOTICE
+    .saturating_add(STOP_NOTICE)
+    .saturating_add(FINAL_FLUSH)
+    .saturating_add(STOP_NOTICE)
+    .saturating_add(Duration::from_millis(250));
+
+/// Waits until no connection attempt holds the single-flight flag, or
+/// [`TEARDOWN_WAIT`] has passed.
+async fn wait_for_teardown(server_sender: &RwServerSender) {
+    let deadline = tokio::time::Instant::now() + TEARDOWN_WAIT;
+    while !server_sender.is_need_connect().await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -519,59 +631,71 @@ async fn outer_ping_loop_cheker(
             }
             _ = tokio::time::sleep(Duration::from_secs(current_retry_seconds)) => {}
         }
-        let server_sender_read = server_sender.read().await;
-
-        // Check if connection is dead (no messages for 4x retry period)
-        if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 4)
-                < now().timestamp()
-        {
-            drop(server_sender_read);
-            server_sender.send_status(SenderStatus::Disconnected).await;
-
-            if !use_keep_ip {
-                server_sender.remove_ip().await;
-            }
-
-            // Attempt reconnection with exponential backoff
-            server_sender.send_status(SenderStatus::Reconnecting).await;
-            let (metrics, connection_store) = {
-                let guard = server_sender.read().await;
-                (guard.metrics.clone(), guard.connection_store.clone())
-            };
-            metrics.inc_reconnections();
-            let server_sender = server_sender.clone();
-            let options = options.clone();
-            tokio::spawn(async move {
-                if let Err(e) = get_outer_connect(connection_store, server_sender, options).await {
-                    log_error!("External reconnection failed: {:?}", e);
-                }
-            });
-
-            // Exponential backoff: double the retry interval (capped at 8x base)
-            current_retry_seconds = (current_retry_seconds * 2).min(max_retry_seconds);
-        }
-        // Send a ping if no messages for 2x retry period
-        else if server_sender_read.server_received_times > 0
-            && server_sender_read.server_received_times + (retry_seconds as i64 * 2)
-                < now().timestamp()
-        {
-            log_debug!(
-                "send: {:?}, current: {:?}",
-                server_sender_read.server_received_times,
-                now().timestamp()
+        // See `internal_ping_loop_cheker`: judged and taken down under the
+        // one lock; `use_keep_ip` decides about the address.
+        let (silence, connection_store) = {
+            let mut guard = server_sender.write().await;
+            let silence = judge_silence(
+                guard.server_received_times,
+                guard.connected_at,
+                retry_seconds as i64,
+                now().timestamp(),
             );
-
-            if options.use_ping {
-                log_debug!("Try ping from loop checker");
-                let connection_store = server_sender_read.connection_store.clone();
-                drop(server_sender_read);
-                let id: String = connection_store.get_client_id().await;
-                server_sender.send(make_ping_message(&id)).await;
+            if silence == Silence::Dead {
+                if !use_keep_ip {
+                    guard.remove_ip();
+                } else if silence_is_evidence(&options) {
+                    guard.drop_connection();
+                }
             }
-        } else {
-            // Connection is alive — reset reconnection backoff
-            current_retry_seconds = retry_seconds;
+            (silence, guard.connection_store.clone())
+        };
+
+        match silence {
+            Silence::Dead => {
+                server_sender.send_status(SenderStatus::Disconnected).await;
+
+                // Attempt reconnection with exponential backoff
+                server_sender.send_status(SenderStatus::Reconnecting).await;
+                let metrics = server_sender.read().await.metrics.clone();
+                metrics.inc_reconnections();
+                let server_sender = server_sender.clone();
+                let options = options.clone();
+                tokio::spawn(async move {
+                    wait_for_teardown(&server_sender).await;
+                    if let Err(e) =
+                        get_outer_connect(connection_store, server_sender, options).await
+                    {
+                        log_error!("External reconnection failed: {:?}", e);
+                    }
+                });
+
+                // Exponential backoff: double the retry interval (capped at 8x base)
+                current_retry_seconds = (current_retry_seconds * 2).min(max_retry_seconds);
+            }
+            Silence::Quiet => {
+                if options.use_ping {
+                    log_debug!("Try ping from loop checker");
+                    let id: String = connection_store.get_client_id().await;
+                    // With a deadline. A connection whose writer is parked on
+                    // a socket that has stopped taking writes has a full
+                    // queue, and a ping that waited for room in it would
+                    // keep this loop from ever reaching "dead".
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(retry_seconds),
+                        server_sender.send(make_ping_message(&id)),
+                    )
+                    .await;
+                }
+            }
+            // A connection that has been made and not heard from yet: too
+            // young to call dead, and no reason to forget how often the ones
+            // before it failed.
+            Silence::Unproven => {}
+            Silence::Alive => {
+                // Connection is alive — reset reconnection backoff
+                current_retry_seconds = retry_seconds;
+            }
         }
         log_debug!("loop server checker finish");
     }
@@ -779,6 +903,22 @@ pub async fn get_internal_connect(
             // record on the first success.
             let url = to_ws_url(_server_ip, &connect_port);
             server_sender.send_status(SenderStatus::Connecting).await;
+
+            // A kept address that goes on failing may simply be the server
+            // taking its time — or the server may have moved. Discovery, if
+            // it is on, is started beside the dial rather than in its place:
+            // the dial is what brings a restarted server back within one
+            // attempt, and a scan takes most of a minute.
+            let failed_dials = server_sender.read().await.failed_dials;
+            if wants_discovery(&options, failed_dials) {
+                tokio::spawn(discover_beside_dials(
+                    connect_port.clone(),
+                    connection_store.clone(),
+                    server_sender.clone(),
+                    options.clone(),
+                ));
+            }
+
             tokio::spawn(wrap_get_internal_websocket(
                 connection_store,
                 server_sender.clone(),
@@ -789,6 +929,154 @@ pub async fn get_internal_connect(
     };
 
     Ok(())
+}
+
+/// How many dials of a kept address fail in a row before discovery is
+/// brought in beside them.
+///
+/// One or two is a server restarting. It is a count of dials, not a length
+/// of time: how long three take depends on who is asking for connections —
+/// seconds for an application that redials every few seconds, minutes for
+/// the checker alone at its default pace. Not an option: the cost of being
+/// wrong either way is small — a scan a little early, or a little late —
+/// and it is paid only by clients with both `use_keep_ip` and
+/// `use_scan_discovery`.
+#[cfg(all(feature = "native-db", feature = "bebop"))]
+const DISCOVERY_AFTER_FAILED_DIALS: u32 = 3;
+
+/// Whether a client that keeps its address should also look for the server
+/// elsewhere. Only one that was asked to discover at all.
+#[cfg(all(feature = "native-db", feature = "bebop"))]
+fn wants_discovery(options: &ClientOptions, failed_dials: u32) -> bool {
+    options.use_keep_ip
+        && options.use_scan_discovery
+        && failed_dials >= DISCOVERY_AFTER_FAILED_DIALS
+}
+
+/// Scans the local subnet while the kept address goes on being dialed, and
+/// hands over the connection if a server answers.
+///
+/// Reports no status: the dials are what the application is watching, and a
+/// scan that finds nothing has changed nothing. A server found here replaces
+/// the kept address the usual way, when its connection is registered.
+#[cfg(all(feature = "native-db", feature = "bebop"))]
+async fn discover_beside_dials(
+    connect_port: String,
+    connection_store: Arc<dyn ConnectionStore>,
+    server_sender: RwServerSender,
+    options: ClientOptions,
+) {
+    // Cheap exit first: with a scan already running, every request that
+    // finds the count at the threshold would otherwise build a scan list
+    // (a socket call and 254 strings) just to be turned away below.
+    {
+        let guard = server_sender.read().await;
+        if guard.is_scanning || !wants_discovery(&options, guard.failed_dials) {
+            return;
+        }
+    }
+
+    // A scan builds its list from this machine's own IPv4 address; without
+    // one there is nothing to scan (and `ScanManager` would index past the
+    // end of what it was given). The manager is built here, before the
+    // single-flight flag goes up: it reads the address again, and nothing
+    // that can fail may sit between raising that flag and lowering it.
+    if get_ip_address().split('.').count() != 4 {
+        return;
+    }
+    let mut manager = ScanManager::new(&connect_port);
+
+    // Same single-flight as every other scan, and the request checked again
+    // under the lock: a connection made since it was sent has put the count
+    // back to zero, and there is nothing to look for. The count starts over
+    // here, at the point a scan really starts.
+    let connected_before = {
+        let mut guard = server_sender.write().await;
+        if guard.is_scanning || !wants_discovery(&options, guard.failed_dials) {
+            return;
+        }
+        guard.is_scanning = true;
+        guard.failed_dials = 0;
+        guard.connected_at
+    };
+
+    // The scan stops as soon as a connection is made by other means: the
+    // kept address answered after all. Without that it would run on, open a
+    // second connection to the same server, and have to throw it away.
+    let scan_timeout = Duration::from_secs(options.scan_timeout_seconds.max(1));
+    let found = {
+        let scan = manager.run_with_timeout(scan_timeout);
+        tokio::pin!(scan);
+        tokio::select! {
+            found = &mut scan => found,
+            _ = connection_made_since(&server_sender, connected_before) => None,
+        }
+    };
+    manager.stop();
+    // With everything else it opened: only the stream that was found is
+    // wanted, and it lives as long as the connection made from it.
+    drop(manager);
+
+    let found = {
+        let mut guard = server_sender.write().await;
+        guard.is_scanning = false;
+        if guard.connected_at != connected_before {
+            // Connected meanwhile; whatever the scan found is not needed.
+            return;
+        }
+        if found.is_none() {
+            // Nothing found. Three more failed dials before the next scan,
+            // rather than one scan straight after another.
+            guard.failed_dials = 0;
+        }
+        found
+    };
+    let Some((server_ip, ws_stream)) = found else {
+        return;
+    };
+
+    // A dial of the kept address may be holding the single-flight flag, for
+    // as long as its timeout if that address no longer answers. Wait that
+    // long, and a second more, rather than throw away the server that was
+    // just found. If the flag is still held after that, the dial got through
+    // and there is nothing to replace: the found connection is dropped.
+    let patience = Duration::from_secs(options.connect_timeout_seconds + 1);
+    let deadline = tokio::time::Instant::now() + patience;
+    let connect_guard = loop {
+        if let Some(guard) = TryConnectGuard::try_acquire(server_sender.clone()).await {
+            break guard;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            log_debug!("Scan found a server but the kept address connected first");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    if let Err(error) = handle_websocket(
+        connection_store,
+        server_sender,
+        options,
+        server_ip,
+        ws_stream,
+        connect_guard,
+    )
+    .await
+    {
+        log_error!("Error handling websocket: {:?}", error);
+    }
+}
+
+/// Resolves once a connection has been registered that was not there at
+/// `connected_before`.
+#[cfg(all(feature = "native-db", feature = "bebop"))]
+async fn connection_made_since(server_sender: &RwServerSender, connected_before: i64) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if server_sender.read().await.connected_at != connected_before {
+            return;
+        }
+    }
 }
 
 /// Initiates a connection to an internal server (simplified version).
@@ -963,6 +1251,151 @@ mod tests {
         assert_eq!(options.retry_seconds, 5);
         assert!(options.use_keep_ip);
         assert_eq!(options.connect_timeout_seconds, 1);
+    }
+
+    const RETRY: i64 = 5;
+    const NOW: i64 = 1_700_000_000;
+
+    #[test]
+    fn a_client_that_never_connected_is_not_called_dead() {
+        assert_eq!(judge_silence(0, 0, RETRY, NOW), Silence::Alive);
+    }
+
+    #[test]
+    fn silence_is_pinged_after_two_periods_and_dead_after_four() {
+        // Exactly on the mark still counts as the gentler of the two.
+        assert_eq!(judge_silence(NOW - 2 * RETRY, 0, RETRY, NOW), Silence::Alive);
+        assert_eq!(judge_silence(NOW - 2 * RETRY - 1, 0, RETRY, NOW), Silence::Quiet);
+        assert_eq!(judge_silence(NOW - 4 * RETRY, 0, RETRY, NOW), Silence::Quiet);
+        assert_eq!(judge_silence(NOW - 4 * RETRY - 1, 0, RETRY, NOW), Silence::Dead);
+    }
+
+    /// The reconnect after an hour of silence: the new connection is up and
+    /// its first pong has not arrived yet. The last message on record is the
+    /// old connection's, an hour ago.
+    #[test]
+    fn a_connection_just_made_is_not_judged_by_the_one_before_it() {
+        let an_hour_ago = NOW - 3600;
+        assert_eq!(judge_silence(an_hour_ago, NOW, RETRY, NOW), Silence::Unproven);
+        assert_eq!(
+            judge_silence(an_hour_ago, NOW - 2 * RETRY, RETRY, NOW),
+            Silence::Unproven
+        );
+    }
+
+    /// Not dead — but not "alive" either, which is what resets the backoff
+    /// between redials. A server that accepts every connection and answers
+    /// none must still be dialed less and less often.
+    #[test]
+    fn a_connection_not_heard_from_yet_does_not_count_as_alive() {
+        let an_hour_ago = NOW - 3600;
+        assert_ne!(judge_silence(an_hour_ago, NOW - 1, RETRY, NOW), Silence::Alive);
+        // Heard from since it was made: alive.
+        assert_eq!(judge_silence(NOW, NOW - 1, RETRY, NOW), Silence::Alive);
+        assert_eq!(judge_silence(NOW - 1, NOW - 1, RETRY, NOW), Silence::Alive);
+    }
+
+    /// The clock was set back after the connection was made. Its stamp is in
+    /// the future and nothing refreshes it; believed, it would call the
+    /// connection young until the clock caught up.
+    #[test]
+    fn a_connection_stamped_in_the_future_is_judged_by_its_messages() {
+        let tomorrow = NOW + 86_400;
+        assert_eq!(
+            judge_silence(NOW - 4 * RETRY - 1, tomorrow, RETRY, NOW),
+            Silence::Dead
+        );
+        assert_eq!(
+            judge_silence(NOW - 2 * RETRY - 1, tomorrow, RETRY, NOW),
+            Silence::Quiet
+        );
+        assert_eq!(judge_silence(NOW - 1, tomorrow, RETRY, NOW), Silence::Alive);
+    }
+
+    /// Silence means something only to a client that pings and is answered.
+    #[test]
+    fn silence_is_evidence_only_for_a_client_that_pings() {
+        let pinging = ClientOptions {
+            use_ping: true,
+            ..Default::default()
+        };
+        let quiet = ClientOptions {
+            use_ping: false,
+            ..Default::default()
+        };
+        // Without bebop there is no pong to wait for, ping or not.
+        assert_eq!(silence_is_evidence(&pinging), cfg!(feature = "bebop"));
+        assert!(!silence_is_evidence(&quiet));
+    }
+
+    /// It gets the same patience as any other, and no more.
+    #[test]
+    fn a_new_connection_that_never_answers_is_dead_in_its_turn() {
+        let an_hour_ago = NOW - 3600;
+        assert_eq!(
+            judge_silence(an_hour_ago, NOW - 2 * RETRY - 1, RETRY, NOW),
+            Silence::Quiet
+        );
+        assert_eq!(
+            judge_silence(an_hour_ago, NOW - 4 * RETRY - 1, RETRY, NOW),
+            Silence::Dead
+        );
+    }
+
+    /// A message since the connection was made is what counts once there is
+    /// one.
+    #[test]
+    fn the_later_of_the_two_stamps_is_the_one_that_counts() {
+        assert_eq!(
+            judge_silence(NOW - 1, NOW - 3600, RETRY, NOW),
+            Silence::Alive
+        );
+        assert_eq!(
+            judge_silence(NOW - 4 * RETRY - 1, NOW - 3600, RETRY, NOW),
+            Silence::Dead
+        );
+    }
+
+    #[cfg(all(feature = "native-db", feature = "bebop"))]
+    fn keeping(use_scan_discovery: bool) -> ClientOptions {
+        ClientOptions {
+            use_keep_ip: true,
+            use_scan_discovery,
+            ..Default::default()
+        }
+    }
+
+    /// One or two failed dials is a server restarting.
+    #[cfg(all(feature = "native-db", feature = "bebop"))]
+    #[test]
+    fn discovery_waits_for_the_kept_address_to_fail_three_times() {
+        let options = keeping(true);
+        assert!(!wants_discovery(&options, 0));
+        assert!(!wants_discovery(&options, 2));
+        assert!(wants_discovery(&options, 3));
+        assert!(wants_discovery(&options, 30));
+    }
+
+    /// A tablet with a typed-in address never scans by itself, however long
+    /// the server is away.
+    #[cfg(all(feature = "native-db", feature = "bebop"))]
+    #[test]
+    fn a_client_that_was_not_asked_to_discover_never_does() {
+        assert!(!wants_discovery(&keeping(false), 30));
+    }
+
+    /// Without `use_keep_ip` there is no kept address to give up on: the
+    /// first failed dial already cleared it, and discovery takes its usual
+    /// path.
+    #[cfg(all(feature = "native-db", feature = "bebop"))]
+    #[test]
+    fn discovery_beside_dials_is_only_for_a_kept_address() {
+        let options = ClientOptions {
+            use_keep_ip: false,
+            use_scan_discovery: true,
+            ..Default::default()
+        };
+        assert!(!wants_discovery(&options, 30));
     }
 
     #[test]

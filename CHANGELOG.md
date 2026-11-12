@@ -1,5 +1,158 @@
 # Changes
 
+## 0.9.8
+
+### Fixed
+
+- A connection that went silent without closing kept a `use_keep_ip` client
+  offline for good. When nothing has arrived for four retry periods the
+  checker reports `Disconnected` and dials again — but with `use_keep_ip` it
+  left the silent connection standing, and that connection goes on holding
+  the single-flight flag every reconnect path checks first. So the dial was
+  turned away, on that look and on every look after it. Without
+  `use_keep_ip` the connection was taken down as a side effect of forgetting
+  the address, which is why only clients that keep their address were stuck.
+
+  A socket goes silent without closing when a tablet's screen turns off and
+  takes the network with it, and when a server drops a client from its list
+  but keeps the socket: writes go through, nothing comes back, nothing
+  errors. A server that is killed closes the socket, and that case already
+  worked.
+
+  The checker now takes the connection down either way, and `use_keep_ip`
+  decides only whether the address goes with it. This is for clients that
+  ping and are answered (`use_ping`, built with `bebop`): for them a link
+  that returns no pong is dead. A client that does not ping hears nothing on
+  a healthy link with nothing to say, so with `use_keep_ip` its silence is
+  reported as it was before and the link is left alone.
+
+  A client that forgets its address (`use_keep_ip` off) is taken down on
+  silence as it always was, whether it pings or not. What changes is a build
+  without `bebop`: there the connection used to stay up holding the flag,
+  with nothing registered to send through, and now it really ends. On an
+  idle link a client that forgets its address and does not ping is
+  therefore reconnected about every five retry periods, as it already was
+  with `bebop`.
+
+- Dropping a connection now ends it, whatever state it is in. A connection
+  was ended by queueing a "disconnect" message for its own writer to send
+  and then recognise. That fails twice over. A writer parked on a socket
+  that has stopped taking writes — the peer stopped acknowledging while the
+  application went on sending — never gets to its queue. And a build without
+  `bebop` has no such message: it queued an empty frame, the writer sent it
+  and carried on, and the connection kept holding the single-flight flag
+  with nothing registered to send through.
+
+  Each connection now has a stop signal. Its writer watches it while idle
+  and while a write is in flight, and `remove_ip`, `drop_connection`,
+  `AtomicClient::disconnect` and a newer connection replacing an older one
+  all end a connection through it.
+
+  On a socket that still works, the writer first sends what `send` had
+  already accepted and then tells the server goodbye, all within 250 ms. A
+  write that is merely in flight when the signal arrives gets another
+  250 ms before the connection is called parked and given up, and a parked
+  one is closed without waiting to flush. What is queued behind a parked
+  write, or does not fit in the 250 ms — a message of several hundred
+  kilobytes on a slow link — goes with the connection. 0.9.7 queued the
+  goodbye behind everything and so wrote the lot, on a socket that worked.
+  A caller that runs its own writer on the receiver it passed to `add` now
+  sees the channel close, where it used to be sent a Disconnect message.
+
+  A `send` that is waiting for room in the queue when the connection is
+  dropped on purpose — `remove_ip`, `AtomicClient::disconnect` — no longer
+  brings the connection back. It used to fail when the queue closed and
+  redial the address it had captured.
+
+- A connection that ends now closes its socket. The task reading from the
+  server used to be left running when this end gave up first; on a socket
+  the other side never closed it stayed forever, kept the socket open, and
+  would have stamped the client "heard from the server" if the old socket
+  ever delivered anything. It is stopped with the connection. On a socket
+  that still works and has been heard from recently it is first given a
+  moment to end by itself — a server that has read the goodbye hangs up —
+  because closing with unread data makes the OS reset the connection, and a
+  reset can take the last messages written with it. A connection that has
+  gone quiet is closed at once. What it had read and not yet handed on goes
+  with the connection.
+
+- A connection made a moment ago is no longer judged by its predecessor's
+  last message. The checker measured silence from the last message on any
+  connection, so between a reconnect and its first pong the new connection
+  looked exactly as dead as the old one, and a look that fell in that gap
+  took it down again. Silence is now counted from the later of the last
+  message and the moment the connection was registered. A connection that
+  has not been heard from yet does not reset the backoff between redials
+  either, so a server that accepts connections and answers none is still
+  dialed less and less often. A registration time later than the clock —
+  the clock was set back — is not believed.
+
+- The dial that follows a dead connection no longer loses a whole backoff
+  step. It was started in the same breath as the teardown and usually
+  arrived while the old connection still held the flag. It now waits up to
+  two seconds for the flag.
+
+- A `send` that was waiting on a connection which has since been dropped or
+  replaced no longer reports `Disconnected` when it gives up. It reported
+  the failure of a connection that had already been dealt with, and that
+  put `Disconnected` after the replacement's `Connected`: an application
+  that mirrors the status showed Offline over a working connection.
+
+- The checker's ping has a deadline of one retry period. It went through the
+  connection's queue with none, so on a connection whose queue was full
+  behind a parked writer the checker waited there and never got as far as
+  calling the connection dead.
+
+- A dial that fails no longer costs a `use_keep_ip` client its address. The
+  connect path cleared the stored address on any failed attempt, kept or
+  not. One attempt while the server was restarting, or out of reach for a
+  few seconds, and the client had nowhere left to dial: it came back only if
+  discovery was on and a subnet scan found the server — most of a minute —
+  or the application handed it the address again. A client that keeps its
+  address now keeps it through failed dials, and whatever asks for a
+  connection next dials it again: the application, or the checker once the
+  client has heard from a server in this run. Without `use_keep_ip` nothing
+  changes: the address goes with the first failure.
+
+  Because the address is no longer forgotten, the same failure can repeat
+  for as long as the server is away. It is logged the first time and then
+  once in twenty.
+
+### Changed
+
+- With `use_keep_ip` and `use_scan_discovery` both on, discovery now runs
+  *beside* the dials of the kept address instead of only after the address
+  has been thrown away. This is for internal clients built with `native-db`
+  and `bebop`; a client that dials a URL has no stored address to give up
+  on. Once three dials in a row have failed, the next request for a
+  connection also starts a scan of the local subnet in the background, and
+  dials the kept address as usual. A server that comes back where it was is
+  reconnected by the dial; one that moved is found by the scan, and what the
+  scan finds replaces the kept address.
+
+  The scan reports no status of its own. It stops as soon as a connection
+  is made some other way. If it finds a server while a dial is in flight it
+  waits `connect_timeout_seconds` and one second more for the single-flight
+  flag; if the flag is still held then, the dial got through and the found
+  connection is dropped. After a scan that finds nothing, three more dials
+  have to fail before the next one starts.
+
+  `is_scanning` is set for the length of such a scan, as for any other. An
+  application that stops asking for connections while it is set will want to
+  go on asking when the client has a kept address, or the dials beside the
+  scan are only the library's own.
+
+### Added
+
+- `ServerSender::drop_connection`: end the current connection and keep the
+  server address. What `remove_ip` does to the connection, without what it
+  does to the address. (Both only touch the address held in memory; the
+  stored copy is cleared by `remove_ip_if_valid_server_ip` alone.)
+- `ServerSender::connected_at`: when the current connection was registered.
+- `ServerSender::failed_dials`: how many dials of a kept address have failed
+  in a row. Zero again when a connection is made, when the address is
+  forgotten, and when a scan beside the dials starts or ends empty-handed.
+
 ## 0.9.7
 
 ### Fixed

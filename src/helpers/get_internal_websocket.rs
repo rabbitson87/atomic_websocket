@@ -23,8 +23,8 @@ use crate::{
     helpers::{
         common::{make_disconnect_message, make_ping_message},
         connection_store::ConnectionStore,
-        server_sender::{SenderStatus, ServerSenderTrait},
-        traits::atomic::FlagAtomic,
+        server_sender::{register_connection, SenderStatus, ServerSenderTrait},
+        traits::{atomic::FlagAtomic, date_time::now},
     },
     log_debug, log_error, Settings,
 };
@@ -33,6 +33,16 @@ use super::{
     internal_client::ClientOptions,
     types::{save_key, RwServerSender, DB},
 };
+
+/// How long a connection that is being ended gets to tell the server so.
+///
+/// Short on purpose: the connections that get ended are mostly the ones whose
+/// socket has gone quiet, and the goodbye is a courtesy to a server that is
+/// still there.
+pub(crate) const STOP_NOTICE: Duration = Duration::from_millis(250);
+
+/// How long a connection that has ended gets to flush what it already wrote.
+pub(crate) const FINAL_FLUSH: Duration = Duration::from_secs(1);
 
 /// Guard that owns the `is_try_connect` single-flight lock for the lifetime of
 /// one connection attempt, and resets it to `false` on drop.
@@ -166,16 +176,95 @@ pub async fn get_internal_websocket(
         }
         Err(e) => {
             // connect_guard drops here, resetting is_try_connect automatically.
-            server_sender.remove_ip_if_valid_server_ip(&server_ip).await;
-            log_error!("Error connecting to {}: {:?}", server_ip, e);
+            if worth_logging(dial_failed(&server_sender, &options, &server_ip).await) {
+                log_error!("Error connecting to {}: {:?}", server_ip, e);
+            }
         }
         Ok(Err(e)) => {
-            server_sender.remove_ip_if_valid_server_ip(&server_ip).await;
-            log_error!("Error connecting to {}: {:?}", server_ip, e);
+            if worth_logging(dial_failed(&server_sender, &options, &server_ip).await) {
+                log_error!("Error connecting to {}: {:?}", server_ip, e);
+            }
         }
     }
     log_debug!("Connection session ended for {}", server_ip);
     Ok(())
+}
+
+/// Whether the server has said anything within two retry periods — the
+/// measure `is_valid_server_ip` uses for a connection that is alive.
+async fn heard_recently(server_sender: &RwServerSender, retry_seconds: u64) -> bool {
+    let last = server_sender.read().await.server_received_times;
+    last + retry_seconds.max(1) as i64 * 2 > now().timestamp()
+}
+
+/// What a connection does when this end closes it: writes what `send` had
+/// already accepted, then tells the server goodbye — as far as the socket
+/// takes them within [`STOP_NOTICE`].
+///
+/// The queue first, because a caller that sends its last message and then
+/// disconnects has been told the message was accepted. Not getting it all
+/// out in time is not an error: the socket is closed right after either way.
+async fn wind_down<S>(
+    ostream: &mut S,
+    rx: &mut mpsc::Receiver<tokio_tungstenite::tungstenite::Message>,
+    server_ip: &str,
+) where
+    S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+{
+    let _ = timeout(STOP_NOTICE, async {
+        while let Ok(message) = rx.try_recv() {
+            if ostream.send(message).await.is_err() {
+                return;
+            }
+        }
+        let _ = ostream.send(make_disconnect_message(server_ip)).await;
+    })
+    .await;
+}
+
+/// What a dial that did not get through does to the address it dialed.
+///
+/// A client that does not keep its address forgets it, in memory and in the
+/// store, and is back to discovery or to being told where the server is.
+///
+/// A client that keeps its address (`use_keep_ip`) keeps it here too. It used
+/// to lose it like the other: one attempt while the server was restarting —
+/// or was out of reach for a few seconds — and the saved address was gone,
+/// leaving a subnet scan, or nothing at all, as the way back. The failure is
+/// counted instead, so that discovery can be brought in beside the dials when
+/// the address keeps failing (see `get_internal_connect`).
+///
+/// Returns how many dials of the kept address have now failed in a row; zero
+/// for a client that does not keep one.
+async fn dial_failed(
+    server_sender: &RwServerSender,
+    options: &ClientOptions,
+    server_ip: &str,
+) -> u32 {
+    if !options.use_keep_ip {
+        server_sender.remove_ip_if_valid_server_ip(server_ip).await;
+        return 0;
+    }
+    let mut guard = server_sender.write().await;
+    // Whatever connection was registered before this dial is over; only the
+    // address stays.
+    guard.drop_connection();
+    guard.failed_dials = guard.failed_dials.saturating_add(1);
+    guard.failed_dials
+}
+
+/// How many failed dials apart the kept address is written to the log again.
+const LOG_EVERY_FAILED_DIALS: u32 = 20;
+
+/// Whether this failed dial is worth a line in the log.
+///
+/// A client that forgets its address fails once per address and always was
+/// logged. One that keeps it fails again on every attempt for as long as the
+/// server is away — every few seconds, all night, each line carrying the
+/// server's address. The first failure says what happened; after that, one
+/// line in [`LOG_EVERY_FAILED_DIALS`] says it is still happening.
+fn worth_logging(failed_dials: u32) -> bool {
+    failed_dials <= 1 || failed_dials % LOG_EVERY_FAILED_DIALS == 0
 }
 
 /// Handles an established WebSocket connection.
@@ -212,7 +301,7 @@ pub async fn handle_websocket(
 
     let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
     let id = connection_store.get_client_id().await;
-    server_sender.add(sx.clone(), &server_ip).await;
+    let stop = register_connection(&server_sender, sx.clone(), &server_ip).await;
 
     let mut is_first = true;
     let use_ping = options.use_ping;
@@ -231,7 +320,7 @@ pub async fn handle_websocket(
     let (stream_end_tx, mut stream_end_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn a task to handle incoming messages
-    tokio::spawn(async move {
+    let mut reader = tokio::spawn(async move {
         let server_ip = server_ip_clone;
         let server_sender = server_sender_clone;
         let is_wait_ping = Arc::new(AtomicBool::new(false));
@@ -282,13 +371,42 @@ pub async fn handle_websocket(
         let _ = stream_end_tx.send(());
     });
 
-    // Handle outgoing messages, also watching for reader stream end
-    loop {
+    // Handle outgoing messages, also watching for reader stream end and for
+    // this end giving the connection up.
+    let mut parked = false;
+    'writer: loop {
         tokio::select! {
+            // In this order: once this end has given the connection up,
+            // nothing new is started.
+            biased;
+            _ = stop.cancelled() => {
+                wind_down(&mut ostream, &mut rx, &server_ip).await;
+                break;
+            }
             msg = rx.recv() => {
                 match msg {
                     Some(message) => {
-                        match ostream.send(message.clone()).await {
+                        // A socket that has stopped taking writes parks this
+                        // await for as long as the OS allows, and nothing
+                        // queued behind it is ever looked at. The stop signal
+                        // has to reach the connection here too — but only a
+                        // write that is really parked is given up: one that
+                        // is merely in flight gets the same short notice the
+                        // goodbye does.
+                        let write = ostream.send(message.clone());
+                        tokio::pin!(write);
+                        let sent = tokio::select! {
+                            biased;
+                            sent = &mut write => sent,
+                            _ = stop.cancelled() => match timeout(STOP_NOTICE, &mut write).await {
+                                Ok(sent) => sent,
+                                Err(_) => {
+                                    parked = true;
+                                    break 'writer;
+                                }
+                            },
+                        };
+                        match sent {
                             Ok(_) => {
                                 let data = message.into_data();
                                 let data = match get_data_schema(&data) {
@@ -321,7 +439,34 @@ pub async fn handle_websocket(
         }
     }
     log_debug!("WebSocket closed");
-    let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
+    // The writer is done, so the connection is over — and the reader has to
+    // go with it. When this end was the one that gave up (the checker dropped
+    // a connection that had gone silent, or the application disconnected) the
+    // reader is still parked on a socket nothing may ever arrive on; left
+    // alone it keeps that socket open for as long as the other side does, and
+    // stamps this client "heard from the server" if anything ever does arrive.
+    if parked {
+        // A socket that would not even take the write that was in flight:
+        // there is nothing to flush that a flush could get out, and nobody
+        // on the other side to wait for.
+        reader.abort();
+    } else {
+        let _ = timeout(FINAL_FLUSH, ostream.flush()).await;
+        // A server that has read the goodbye hangs up, and the reader ends
+        // with that. It is given a moment to: closing first, with what the
+        // server sent still unread, makes the OS reset the connection, and a
+        // reset can take the last messages this end wrote with it.
+        //
+        // Only worth the moment on a connection that is talking. One that
+        // has gone quiet has nothing unread to reset over — and it is the
+        // kind that gets ended by whoever cannot spare a quarter of a second
+        // (the checker, an application's supervisor after a wake).
+        let hung_up = heard_recently(&server_sender, options.retry_seconds).await
+            && timeout(STOP_NOTICE, &mut reader).await.is_ok();
+        if !hung_up {
+            reader.abort();
+        }
+    }
     // Normal exit: reset flag directly and disarm guard
     server_sender.write().await.is_try_connect = false;
     connect_guard.disarm();
@@ -343,7 +488,7 @@ pub async fn handle_websocket(
     log_debug!("Connected to {} for web socket", server_ip);
 
     let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
-    server_sender.add(sx.clone(), &server_ip).await;
+    let stop = register_connection(&server_sender, sx.clone(), &server_ip).await;
 
     // Without bebop there is no pong handshake, so emit Connected immediately
     // and set the initial received timestamp for the loop checker.
@@ -354,7 +499,7 @@ pub async fn handle_websocket(
     let (stream_end_tx, mut stream_end_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn a task to handle incoming messages - pass raw bytes
-    tokio::spawn(async move {
+    let mut reader = tokio::spawn(async move {
         let server_sender = server_sender_clone;
 
         while let Some(Ok(message)) = istream.next().await {
@@ -366,13 +511,38 @@ pub async fn handle_websocket(
         let _ = stream_end_tx.send(());
     });
 
-    // Handle outgoing messages, also watching for reader stream end
-    loop {
+    // Handle outgoing messages, also watching for reader stream end and for
+    // this end giving the connection up. Without bebop there is no message
+    // the writer could recognise as "stop", so the signal is the only way.
+    let mut parked = false;
+    'writer: loop {
         tokio::select! {
+            // In this order: once this end has given the connection up,
+            // nothing new is started.
+            biased;
+            _ = stop.cancelled() => {
+                wind_down(&mut ostream, &mut rx, &server_ip).await;
+                break;
+            }
             msg = rx.recv() => {
                 match msg {
                     Some(message) => {
-                        if let Err(e) = ostream.send(message).await {
+                        // See the bebop variant: a parked write must not hide
+                        // the stop signal, and only a parked one is given up.
+                        let write = ostream.send(message);
+                        tokio::pin!(write);
+                        let sent = tokio::select! {
+                            biased;
+                            sent = &mut write => sent,
+                            _ = stop.cancelled() => match timeout(STOP_NOTICE, &mut write).await {
+                                Ok(sent) => sent,
+                                Err(_) => {
+                                    parked = true;
+                                    break 'writer;
+                                }
+                            },
+                        };
+                        if let Err(e) = sent {
                             log_error!("Error sending message: {:?}", e);
                             break;
                         }
@@ -387,7 +557,34 @@ pub async fn handle_websocket(
         }
     }
     log_debug!("WebSocket closed");
-    let _ = timeout(Duration::from_secs(1), ostream.flush()).await;
+    // The writer is done, so the connection is over — and the reader has to
+    // go with it. When this end was the one that gave up (the checker dropped
+    // a connection that had gone silent, or the application disconnected) the
+    // reader is still parked on a socket nothing may ever arrive on; left
+    // alone it keeps that socket open for as long as the other side does, and
+    // stamps this client "heard from the server" if anything ever does arrive.
+    if parked {
+        // A socket that would not even take the write that was in flight:
+        // there is nothing to flush that a flush could get out, and nobody
+        // on the other side to wait for.
+        reader.abort();
+    } else {
+        let _ = timeout(FINAL_FLUSH, ostream.flush()).await;
+        // A server that has read the goodbye hangs up, and the reader ends
+        // with that. It is given a moment to: closing first, with what the
+        // server sent still unread, makes the OS reset the connection, and a
+        // reset can take the last messages this end wrote with it.
+        //
+        // Only worth the moment on a connection that is talking. One that
+        // has gone quiet has nothing unread to reset over — and it is the
+        // kind that gets ended by whoever cannot spare a quarter of a second
+        // (the checker, an application's supervisor after a wake).
+        let hung_up = heard_recently(&server_sender, options.retry_seconds).await
+            && timeout(STOP_NOTICE, &mut reader).await.is_ok();
+        if !hung_up {
+            reader.abort();
+        }
+    }
     // Normal exit: reset flag directly and disarm guard
     server_sender.write().await.is_try_connect = false;
     connect_guard.disarm();
@@ -430,4 +627,24 @@ pub async fn get_id(db: DB) -> String {
     db.get(save_key::CLIENT_ID)
         .map(|v| String::from_utf8(v.clone()).unwrap_or_default())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client that forgets its address reports zero and is logged every
+    /// time, as it always was.
+    #[test]
+    fn a_failed_dial_without_a_kept_address_is_always_logged() {
+        assert!(worth_logging(0));
+    }
+
+    /// The first failure says what happened; then one line in twenty, not
+    /// one every few seconds for the whole night.
+    #[test]
+    fn a_kept_address_that_keeps_failing_is_logged_now_and_then() {
+        let logged: Vec<u32> = (1..=60).filter(|n| worth_logging(*n)).collect();
+        assert_eq!(logged, vec![1, 20, 40, 60]);
+    }
 }

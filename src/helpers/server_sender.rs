@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use bebop::Record;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "bebop")]
 use crate::generated::schema::Data;
@@ -30,7 +31,7 @@ use crate::{
 use crate::helpers::traits::date_time::now;
 
 use super::{
-    common::make_disconnect_message, internal_client::ClientOptions, retry::ExponentialBackoff,
+    internal_client::ClientOptions, retry::ExponentialBackoff,
     types::RwServerSender,
 };
 
@@ -134,6 +135,9 @@ pub enum SenderStatus {
 pub struct ServerSender {
     /// Channel for sending messages to the server
     sx: Option<mpsc::Sender<Message>>,
+    /// Ends the current connection when cancelled. Set with `sx`, taken
+    /// with it.
+    stop: Option<CancellationToken>,
     /// Persistence for connection-identity state (client ID, server connect info)
     pub connection_store: Arc<dyn ConnectionStore>,
     /// Reference to self for recursive operations
@@ -142,6 +146,21 @@ pub struct ServerSender {
     pub server_ip: String,
     /// Timestamp of the last received message
     pub server_received_times: i64,
+    /// Timestamp at which the current connection was registered (0 before
+    /// the first one).
+    ///
+    /// `server_received_times` belongs to whichever connection last heard
+    /// from the server. Right after a reconnect that is still the old one,
+    /// so the checker also needs to know how young the connection it is
+    /// judging is.
+    pub connected_at: i64,
+    /// How many dials have failed in a row on a client that keeps its address
+    /// (`use_keep_ip`). Back to zero with every connection that is made.
+    ///
+    /// Such a client goes on dialing the address it has; this count is how
+    /// it knows when that has stopped being enough and discovery, if it is
+    /// on, should look for the server somewhere else.
+    pub failed_dials: u32,
     /// Channel for sending connection status updates
     status_tx: Sender<SenderStatus>,
     /// Channel for receiving connection status updates (consumed once)
@@ -191,10 +210,13 @@ impl ServerSender {
 
         Self {
             sx: None,
+            stop: None,
             connection_store,
             server_sender: None,
             server_ip,
             server_received_times: 0,
+            connected_at: 0,
+            failed_dials: 0,
             status_tx,
             status_rx: Some(status_rx),
             handle_message_tx,
@@ -238,17 +260,31 @@ impl ServerSender {
         self.server_sender = Some(server_sender);
     }
 
-    /// Closes and drops the current message sender.
+    /// Drops the current message sender and tells the connection to end.
     ///
-    /// Sends a disconnect message before closing to ensure clean shutdown.
+    /// The connection is told through its stop signal, not through a message
+    /// in its own queue. A message has to be taken off the queue and written
+    /// to the socket before the connection acts on it — which a connection
+    /// whose socket has stopped taking writes never gets round to, and which
+    /// a build without `bebop` could not recognise when it did. The
+    /// connection's writer sends the server its goodbye itself, if the
+    /// socket will still take one.
     fn sx_drop(&mut self) {
-        if let Some(sender) = self.sx.take() {
-            let prev_server_ip = self.server_ip.clone();
-            tokio::spawn(async move {
-                let _ = sender.send(make_disconnect_message(&prev_server_ip)).await;
-                sender.closed().await;
-            });
+        self.sx = None;
+        if let Some(stop) = self.stop.take() {
+            stop.cancel();
         }
+    }
+
+    /// The signal that ends the connection registered by the last
+    /// [`add`](Self::add). Already cancelled when there is none — a
+    /// connection that asks after it has been dropped is to end at once.
+    pub(crate) fn stop_signal(&self) -> CancellationToken {
+        self.stop.clone().unwrap_or_else(|| {
+            let ended = CancellationToken::new();
+            ended.cancel();
+            ended
+        })
     }
 
     /// Sets a new message sender and server IP.
@@ -260,7 +296,19 @@ impl ServerSender {
     pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: &str) {
         self.sx_drop();
         self.sx = Some(sx);
+        self.stop = Some(CancellationToken::new());
         self.server_ip = server_ip.into();
+        self.connected_at = now().timestamp();
+        self.failed_dials = 0;
+    }
+
+    /// Ends the current connection and keeps the server address.
+    ///
+    /// What [`remove_ip`](Self::remove_ip) does to the connection, without
+    /// what it does to the address: for a connection that has gone silent on
+    /// a client that is meant to dial the same server again.
+    pub fn drop_connection(&mut self) {
+        self.sx_drop();
     }
 
     /// Removes the current server IP and drops the connection.
@@ -269,6 +317,8 @@ impl ServerSender {
             self.sx_drop();
             self.server_ip = "".into();
         }
+        // The count belongs to the address that has just gone.
+        self.failed_dials = 0;
     }
 
     /// Sends a connection status update.
@@ -404,6 +454,44 @@ pub trait ServerSenderTrait {
     async fn is_need_connect(&self) -> bool;
 }
 
+/// Registers a connection — what [`ServerSenderTrait::add`] does — and
+/// returns the signal that ends it.
+///
+/// Sender, signal and address are set under one lock, so the signal handed
+/// back is the one that belongs to this sender.
+pub(crate) async fn register_connection(
+    server_sender: &RwServerSender,
+    sx: mpsc::Sender<Message>,
+    server_ip: &str,
+) -> CancellationToken {
+    // Update in-memory state
+    let (connection_store, stop) = {
+        let mut guard = server_sender.write().await;
+        guard.add(sx, server_ip);
+        (guard.connection_store.clone(), guard.stop_signal())
+    };
+
+    log_debug!("set start server_ip: {:?}", server_ip);
+
+    // Persist to database (set_server_connect_info handles upsert internally)
+    //
+    // `server_ip` arrives here as a full WebSocket URL — "ws://10.0.0.5:16250"
+    // — from `ScanManager` and from every caller that formats it that way.
+    // Splitting the whole string on ':' and taking index 1 therefore yielded
+    // "//10.0.0.5", the *host*, because the scheme's own colon matches first.
+    // That bogus port was persisted, deliberately preserved by
+    // `clear_server_ip` on disconnect, and handed back as `connect_port` on
+    // every subsequent reconnect and `ScanManager::new` — so one successful
+    // connection was enough to poison reconnection for good.
+    //
+    // Take the last colon-separated segment instead, and only accept it if it
+    // actually looks like a port, so a URL without one ("ws://10.0.0.5")
+    // stores "" rather than "//10.0.0.5" all over again.
+    let port = parse_port(server_ip);
+    connection_store.set_server_connect_info(server_ip, port).await;
+    stop
+}
+
 /// Implementation of ServerSenderTrait for thread-safe server sender.
 ///
 /// This implementation wraps a ServerSender instance with read-write locks
@@ -412,31 +500,7 @@ pub trait ServerSenderTrait {
 impl ServerSenderTrait for RwServerSender {
     /// Sets a new message sender and server IP, also updating the database.
     async fn add(&self, sx: mpsc::Sender<Message>, server_ip: &str) {
-        // Update in-memory state
-        let connection_store = {
-            let mut guard = self.write().await;
-            guard.add(sx, server_ip);
-            guard.connection_store.clone()
-        };
-
-        log_debug!("set start server_ip: {:?}", server_ip);
-
-        // Persist to database (set_server_connect_info handles upsert internally)
-        //
-        // `server_ip` arrives here as a full WebSocket URL — "ws://10.0.0.5:16250"
-        // — from `ScanManager` and from every caller that formats it that way.
-        // Splitting the whole string on ':' and taking index 1 therefore yielded
-        // "//10.0.0.5", the *host*, because the scheme's own colon matches first.
-        // That bogus port was persisted, deliberately preserved by
-        // `clear_server_ip` on disconnect, and handed back as `connect_port` on
-        // every subsequent reconnect and `ScanManager::new` — so one successful
-        // connection was enough to poison reconnection for good.
-        //
-        // Take the last colon-separated segment instead, and only accept it if it
-        // actually looks like a port, so a URL without one ("ws://10.0.0.5")
-        // stores "" rather than "//10.0.0.5" all over again.
-        let port = parse_port(server_ip);
-        connection_store.set_server_connect_info(server_ip, port).await;
+        register_connection(self, sx, server_ip).await;
     }
 
     /// Gets the receiver for connection status updates.
@@ -530,6 +594,20 @@ impl ServerSenderTrait for RwServerSender {
                     );
                     if !backoff.wait().await {
                         metrics.inc_send_errors();
+                        // A send that was waiting on a connection which has
+                        // since been dropped or replaced fails here too. That
+                        // connection's end has been dealt with by whoever
+                        // ended it; reporting it again would put
+                        // `Disconnected` after the replacement's `Connected`.
+                        let still_registered = self
+                            .read()
+                            .await
+                            .sx
+                            .as_ref()
+                            .is_some_and(|current| current.same_channel(&sender));
+                        if !still_registered {
+                            return;
+                        }
                         // Retries exhausted: notify disconnection + spawn reconnection
                         let _ = status_tx.try_send(SenderStatus::Disconnected);
                         if let Some(ref ss) = server_sender_ref {
@@ -803,6 +881,116 @@ mod tests {
         // 빈 상태에서 remove_ip 호출해도 패닉 없음
         sender.remove_ip();
         assert!(sender.server_ip.is_empty());
+    }
+
+    /// What the checker does to a silent connection on a client that keeps
+    /// its address: the connection is told to end, the address stays.
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn drop_connection_ends_the_connection_and_keeps_the_address() {
+        let mut sender = ServerSender::new(
+            create_test_db_native(),
+            "".to_string(),
+            create_test_options_native(),
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        sender.add(tx, "ws://192.168.1.100:9000");
+        let stop = sender.stop_signal();
+        assert!(!stop.is_cancelled(), "a connection just registered is not over");
+
+        sender.drop_connection();
+
+        assert!(sender.sx.is_none(), "nothing can be sent on it any more");
+        assert_eq!(sender.server_ip, "ws://192.168.1.100:9000");
+        // The signal is how the connection learns it is over. Not a message
+        // in its queue: a connection that cannot write never reads its queue.
+        assert!(stop.is_cancelled());
+        assert!(rx.try_recv().is_err(), "nothing is queued for the connection");
+    }
+
+    /// The same signal ends the connection whichever way it is dropped.
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn every_way_of_dropping_a_connection_stops_it() {
+        let mut sender = ServerSender::new(
+            create_test_db_native(),
+            "".to_string(),
+            create_test_options_native(),
+        );
+
+        let (tx, _rx) = mpsc::channel(8);
+        sender.add(tx, "ws://192.168.1.100:9000");
+        let forgotten = sender.stop_signal();
+        sender.remove_ip();
+        assert!(forgotten.is_cancelled(), "remove_ip");
+
+        let (tx, _rx) = mpsc::channel(8);
+        sender.add(tx, "ws://192.168.1.100:9000");
+        let replaced = sender.stop_signal();
+        let (tx, _rx) = mpsc::channel(8);
+        sender.add(tx, "ws://192.168.1.100:9000");
+        assert!(replaced.is_cancelled(), "a newer connection");
+        assert!(!sender.stop_signal().is_cancelled(), "the newer one goes on");
+    }
+
+    /// A connection that asks for its signal after it was dropped has to end
+    /// at once, not wait for a signal nobody holds any more.
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn the_signal_of_a_connection_that_is_gone_is_already_given() {
+        let sender = ServerSender::new(
+            create_test_db_native(),
+            "".to_string(),
+            create_test_options_native(),
+        );
+        assert!(sender.stop_signal().is_cancelled());
+    }
+
+    /// The count of failed dials belongs to an address; it goes when the
+    /// address does.
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn forgetting_the_address_forgets_how_often_it_failed() {
+        let mut sender = ServerSender::new(
+            create_test_db_native(),
+            "ws://192.168.1.100:9000".to_string(),
+            create_test_options_native(),
+        );
+        sender.failed_dials = 7;
+        sender.remove_ip();
+        assert_eq!(sender.failed_dials, 0);
+    }
+
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn drop_connection_without_a_connection_does_nothing() {
+        let mut sender = ServerSender::new(
+            create_test_db_native(),
+            "ws://192.168.1.100:9000".to_string(),
+            create_test_options_native(),
+        );
+        sender.drop_connection();
+        assert_eq!(sender.server_ip, "ws://192.168.1.100:9000");
+    }
+
+    /// The checker judges a connection's silence from when it was made, so
+    /// that has to be recorded when it is.
+    #[cfg(feature = "native-db")]
+    #[tokio::test]
+    async fn add_records_when_the_connection_was_made() {
+        let mut sender = ServerSender::new(
+            create_test_db_native(),
+            "".to_string(),
+            create_test_options_native(),
+        );
+        assert_eq!(sender.connected_at, 0, "no connection yet");
+
+        let before = now().timestamp();
+        let (tx, _rx) = mpsc::channel(8);
+        sender.add(tx, "ws://192.168.1.100:9000");
+
+        assert!(sender.connected_at >= before);
+        assert!(sender.connected_at <= now().timestamp());
     }
 
     #[cfg(not(feature = "native-db"))]

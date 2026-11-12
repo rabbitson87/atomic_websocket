@@ -197,6 +197,14 @@ impl ScanManager {
         }
     }
 
+    /// Tells the probes still waiting their turn not to start. For a caller
+    /// that stops waiting for [`run_with_timeout`](Self::run_with_timeout)
+    /// before it returns; on its own timeout it does this itself.
+    #[cfg(all(feature = "native-db", feature = "bebop"))]
+    pub(crate) fn stop(&self) {
+        self.stop_flag.store(true, Ordering::Release);
+    }
+
     /// Runs the scanning process until a server is found.
     ///
     /// Periodically scans the network until a WebSocket server is discovered.

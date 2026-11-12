@@ -1097,3 +1097,42 @@ async fn test_rapid_server_restart_use_keep_ip_true() {
         "Should reconnect after rapid server restart"
     );
 }
+
+// ============================================================================
+// Group G: A dropped connection really ends
+// ============================================================================
+
+/// G1: `remove_ip` ends the connection and releases the single-flight flag,
+/// in every build.
+///
+/// It used to end the connection by queueing a "disconnect" message for the
+/// connection's own writer to recognise. A build without `bebop` has no such
+/// message — it queued an empty frame, the writer sent it and carried on —
+/// so the connection stayed up, kept holding the flag, and nothing could
+/// connect again. This file runs in every feature combination, which is why
+/// the test is here.
+#[tokio::test]
+async fn test_remove_ip_ends_the_connection_and_releases_the_flag() {
+    let port = find_available_port().await;
+    let _server = TestServer::start(port).await;
+    let (server_sender, mut status_rx, _db) = setup_external_client(port, 2, false).await;
+    assert!(
+        wait_for_status(&mut status_rx, SenderStatus::Connected, Duration::from_secs(10)).await,
+        "Should connect"
+    );
+    assert!(
+        !server_sender.is_need_connect().await,
+        "a live connection holds the flag"
+    );
+
+    server_sender.remove_ip().await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !server_sender.is_need_connect().await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the connection went on after it was dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
