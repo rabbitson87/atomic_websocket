@@ -11,36 +11,36 @@ edition = "2021"
 rust-version = "1.77"
 
 [dependencies]
-tokio = { version = "1.52.3", default-features = false, features = [
+tokio = { version = "1.54.1", default-features = false, features = [
     "sync",
     "macros",
     "time",
     "rt-multi-thread",
 ] }
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 native_db = { version = "0.8.2", optional = true }
 native_model = { version = "0.4.20", optional = true }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 nanoid = "0.5.0"
-futures-util = "0.3.32"
-thiserror = "2.0.18"
+futures-util = "0.3.34"
+thiserror = "2.0.21"
 
 bebop = { version = "3.2.3", optional = true }
 dashmap = "6.2.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-tokio-util = { version = "0.7.18", features = ["rt"] }
-serde = { version = "1.0.228", features = ["derive"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
-rustls = { version = "0.23.41", features = [
+rustls = { version = "0.23.46", features = [
     "ring",
 ], default-features = false, optional = true }
-tokio-rustls = { version = "0.26.4", default-features = false, optional = true }
+tokio-rustls = { version = "0.26.6", default-features = false, optional = true }
 # PEM parsing lives in rustls-pki-types (rustls re-exports it as `rustls::pki_types`).
 # Replaces the unmaintained/archived `rustls-pemfile` (RUSTSEC-2025-0134).
-rustls-pki-types = { version = "1", features = ["std"], optional = true }
-webpki-roots = { version = "1.0.8", optional = true }
-rinf = { version = "8.10.0", optional = true }
-log = { version = "0.4.33", optional = true }
+rustls-pki-types = { version = "1.16.0", features = ["std"], optional = true }
+webpki-roots = { version = "1.0.12", optional = true }
+rinf = { version = "8.11.0", optional = true }
+log = { version = "0.4.35", optional = true }
 
 [workspace]
 members = ["make_bebop", "test_server", "test_client"]
@@ -60,5 +60,5 @@ rustls = [
 rinf = ["dep:rinf"]
 
 [dev-dependencies]
-tokio-test = "0.4.5"
+tokio-test = "0.4.6"
 tempfile = "3.27.0"
