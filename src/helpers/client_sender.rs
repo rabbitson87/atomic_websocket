@@ -43,7 +43,7 @@ const DISCONNECT_NOTICE_TIMEOUT: Duration = Duration::from_millis(200);
 /// Long enough that a tablet briefly behind on its buffer is not dropped for
 /// it; short enough that `send_all` cannot be held open by one unreachable
 /// device. The alternative — no bound — is what this replaced.
-const SEND_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Manages a collection of connected WebSocket clients on the server side.
 ///
@@ -168,6 +168,7 @@ impl ClientSenders {
             ClientSender {
                 sx,
                 send_time: now().timestamp(),
+                heard: Some(tokio::time::Instant::now()),
             },
         );
         self.metrics.inc_connections_total();
@@ -276,7 +277,7 @@ impl ClientSenders {
             .unwrap_or_else(|e| e.into_inner())
             .client_timeout_seconds as i64;
         self.clients.retain(|_, client| {
-            let keep = client.send_time + timeout >= now;
+            let keep = client.silent_for(now) <= Duration::from_secs(timeout.max(0) as u64);
             if !keep {
                 self.metrics.dec_connections_active();
             }
@@ -312,6 +313,40 @@ impl ClientSenders {
     pub fn write_time(&self, peer: &str) {
         if let Some(mut client) = self.clients.get_mut(peer) {
             client.write_time();
+        }
+    }
+
+    /// Whether `peer` is registered with this very sender (its connection,
+    /// and not one that has replaced it, nor none after it was let go).
+    #[cfg(feature = "bebop")]
+    pub(crate) fn holds(&self, peer: &str, sx: &Sender<Message>) -> bool {
+        self.clients
+            .get(peer)
+            .is_some_and(|client| client.sx.same_channel(sx))
+    }
+
+    /// Marks `peer` heard from, if it is still registered with `sx`. One
+    /// operation on the table, so a replacement registered meanwhile is not
+    /// the one touched.
+    #[cfg(feature = "bebop")]
+    pub(crate) fn touch_if_held(&self, peer: &str, sx: &Sender<Message>) {
+        if let Some(mut client) = self.clients.get_mut(peer) {
+            if client.sx.same_channel(sx) {
+                client.write_time();
+            }
+        }
+    }
+
+    /// Lets `peer` go, if it is still registered with `sx`; see
+    /// [`touch_if_held`](Self::touch_if_held).
+    #[cfg(feature = "bebop")]
+    pub(crate) fn remove_if_held(&self, peer: &str, sx: &Sender<Message>) {
+        if self
+            .clients
+            .remove_if(peer, |_, client| client.sx.same_channel(sx))
+            .is_some()
+        {
+            self.metrics.dec_connections_active();
         }
     }
 
@@ -577,12 +612,25 @@ struct ClientSender {
     sx: Sender<Message>,
     /// Timestamp of the last message sent
     send_time: i64,
+    /// The same moment on a clock that setting the wall clock does not move.
+    heard: Option<tokio::time::Instant>,
 }
 
 impl ClientSender {
     /// Updates the last message timestamp to the current time.
     pub fn write_time(&mut self) {
         self.send_time = now().timestamp();
+        self.heard = Some(tokio::time::Instant::now());
+    }
+
+    /// How long the client has been silent, at wall-clock time `now`: the
+    /// longer of the wall-clock and the monotonic reading. The wall clock
+    /// alone kept a dead client for as long as the clock had been set back
+    /// (its stamp lay in the clock's future); the monotonic one does not
+    /// move then. A stamp moved back by hand still counts.
+    fn silent_for(&self, now: i64) -> Duration {
+        let wall_clock = Duration::from_secs((now - self.send_time).max(0) as u64);
+        self.heard.map_or(wall_clock, |at| wall_clock.max(at.elapsed()))
     }
 }
 
@@ -749,6 +797,7 @@ mod tests {
         let mut sender = ClientSender {
             sx: tx,
             send_time: 0,
+            heard: None,
         };
 
         assert_eq!(sender.send_time, 0);
@@ -1054,5 +1103,53 @@ mod tests {
 
         // 실패 후 peer가 제거됨
         assert!(!senders.is_active("peer1").await);
+    }
+
+    /// The server's clock was set back after a client went silent: its last
+    /// message is in the clock's future, which the wall clock alone read as
+    /// "just now" for as long as the clock had gone back. The monotonic
+    /// reading still counts the silence.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_silent_through_a_clock_set_back_is_still_let_go() {
+        let senders = create_test_client_senders();
+        let (tx, _rx) = mpsc::channel(8);
+        senders.add("peer1", tx).await;
+
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        senders.clients.get_mut("peer1").unwrap().send_time += 86_400;
+
+        senders.check_client_send_time();
+        assert!(!senders.clients.contains_key("peer1"));
+    }
+
+    /// And a client heard from a moment ago is kept, whatever its stamp says
+    /// about a wall clock that went back. Guards the fix against going too
+    /// far (reading a stamp in the future as a long silence); 0.9.8 passed it
+    /// too.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_heard_just_now_is_kept_through_a_clock_set_back() {
+        let senders = create_test_client_senders();
+        let (tx, _rx) = mpsc::channel(8);
+        senders.add("peer1", tx).await;
+        senders.clients.get_mut("peer1").unwrap().send_time += 86_400;
+
+        senders.check_client_send_time();
+        assert!(senders.clients.contains_key("peer1"));
+    }
+
+    /// A client that keeps talking is kept, however long ago it connected:
+    /// each message has to restart the monotonic reading, not only the
+    /// wall-clock one.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_keeps_talking_is_kept() {
+        let senders = create_test_client_senders();
+        let (tx, _rx) = mpsc::channel(8);
+        senders.add("peer1", tx).await;
+
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        senders.clients.get_mut("peer1").unwrap().write_time();
+
+        senders.check_client_send_time();
+        assert!(senders.clients.contains_key("peer1"));
     }
 }

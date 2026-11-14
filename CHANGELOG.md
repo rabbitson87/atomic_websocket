@@ -1,5 +1,77 @@
 # Changes
 
+## 0.9.9
+
+### Fixed
+
+- A client could have its new connection closed by the server the moment it
+  was made. The server learns who a client is from the first frame and closes
+  a connection that starts with anything else; the client registered a new
+  connection and only then queued its first ping, so an application sending
+  at that moment got its message out first. An application with messages
+  waiting for the link to come back sends exactly then. The ping is now
+  queued before the connection is registered, so it is always the first
+  frame. The ping scheduled after a pong goes only to the connection whose
+  pong it was, not to one that has replaced it.
+
+- A clock set back made a dead link look alive. Liveness was read from
+  wall-clock stamps: set back, the stamp of the last message lay in the
+  clock's future and read as "just now" until the clock caught up, so for as
+  long as it had been set back `is_valid_server_ip` said yes and the checker
+  never called the link dead. Both now also read a monotonic clock and take
+  the longer of the two silences. `server_received_times` and `connected_at`
+  stay as they were (wall clock, whole seconds), for display and for callers
+  that move them back to stand for silence; a clock set forward still makes
+  the checker redial once, as before.
+
+- The server answered a ping by sending the pong to whichever connection had
+  the client's id, not on the connection the ping came in on. After a
+  reconnect, the old connection's last pings (still read by the server)
+  were answered on the new one. Harmless until a client counts its pongs
+  (see `delivered` below): it would then count answers to pings it never
+  sent on that connection. The server now answers on the connection itself.
+  A client of an older server can still see such a stray pong after a
+  reconnect. As before, a pong that goes out marks the client heard from
+  (a client that only pings stays in the table) and counts in the metrics,
+  and one that cannot be queued drops the client, but only while the
+  client's id is still registered with that connection. The old
+  connection's last pings are no longer answered on the new one.
+
+- The client read websocket ping, pong, close and text frames as the
+  protocol's messages when their payload began like one (a text frame could
+  pass for a pong, or for a goodbye). It now reads binary frames only; any
+  frame still counts as the server being heard from.
+
+- A subnet scan could miss a connection made in the same second as the scan
+  started, and run on to open a second one. It watched `connected_at`, which
+  two connections made in one second share; it now watches the connection
+  number.
+
+### Added
+
+- `ServerSender::connection`: the number of the registered connection, 1 for
+  the first, never reused while the process runs.
+- `ServerSenderTrait::send_to(message, connection) -> bool`: sends on that
+  connection only, and says whether its queue took the message. `send` still
+  returns nothing; it is `send_to` on whatever connection is registered.
+- `ServerSender::heard_ago`, `registered_ago` and `mark_heard`: the readings
+  the checker uses, and the way to record a message.
+- `ServerSender::delivery_mark(connection)` and `delivered(connection,
+  mark)`: whether the server has read a message nothing answers. The client
+  counts the pings it queues on each connection (before queueing them) and
+  the pongs that come back; read the mark right after `send_to` took the
+  message, and once more pongs than that have come back on the same
+  connection, one answers a ping queued after the message, so the server
+  read the message. Never true for a connection that has been replaced.
+  Exact against a 0.9.9 server; an older one can send a stray pong after a
+  reconnect (above).
+- `send_to` is a new required method of `ServerSenderTrait`. Nothing outside
+  the crate is known to implement the trait; an implementation that does has
+  to add it.
+- The server lets a client go after `client_timeout_seconds` of silence by
+  the longer of the wall-clock and the monotonic reading, as the client
+  judges the server; a server clock set back no longer keeps a dead client.
+
 ## 0.9.8
 
 ### Fixed

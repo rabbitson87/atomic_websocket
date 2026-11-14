@@ -23,8 +23,8 @@ use crate::{
     helpers::{
         common::{make_disconnect_message, make_ping_message},
         connection_store::ConnectionStore,
-        server_sender::{register_connection, SenderStatus, ServerSenderTrait},
-        traits::{atomic::FlagAtomic, date_time::now},
+        server_sender::{register_connection, ConnectionTraffic, SenderStatus, ServerSenderTrait},
+        traits::atomic::FlagAtomic,
     },
     log_debug, log_error, Settings,
 };
@@ -193,8 +193,12 @@ pub async fn get_internal_websocket(
 /// Whether the server has said anything within two retry periods — the
 /// measure `is_valid_server_ip` uses for a connection that is alive.
 async fn heard_recently(server_sender: &RwServerSender, retry_seconds: u64) -> bool {
-    let last = server_sender.read().await.server_received_times;
-    last + retry_seconds.max(1) as i64 * 2 > now().timestamp()
+    let window = Duration::from_secs(retry_seconds.max(1) * 2);
+    server_sender
+        .read()
+        .await
+        .heard_ago()
+        .is_some_and(|ago| ago < window)
 }
 
 /// What a connection does when this end closes it: writes what `send` had
@@ -301,14 +305,25 @@ pub async fn handle_websocket(
 
     let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
     let id = connection_store.get_client_id().await;
-    let stop = register_connection(&server_sender, sx.clone(), &server_ip).await;
 
-    let mut is_first = true;
+    // The server learns who this client is from the first frame, and closes
+    // a connection that starts with anything else. The ping is queued before
+    // the connection is registered: until then nothing else can reach this
+    // queue, so nothing the application sends gets in ahead of it.
     let use_ping = options.use_ping;
+    let traffic = Arc::new(ConnectionTraffic::default());
     if use_ping {
         log_debug!("Client send message: {:?}", make_ping_message(&id));
-        server_sender.send(make_ping_message(&id)).await;
-    } else {
+        traffic.ping_queued();
+        if sx.send(make_ping_message(&id)).await.is_ok() {
+            server_sender.read().await.metrics.inc_messages_sent();
+        }
+    }
+    let (stop, connection) =
+        register_connection(&server_sender, sx.clone(), &server_ip, traffic.clone()).await;
+
+    let mut is_first = true;
+    if !use_ping {
         is_first = false;
         server_sender.write_received_times().await;
         server_sender.send_status(SenderStatus::Connected).await;
@@ -327,6 +342,12 @@ pub async fn handle_websocket(
 
         while let Some(Ok(message)) = istream.next().await {
             server_sender.write_received_times().await;
+            // Only a binary frame is one of ours: a websocket ping, pong,
+            // close or text frame whose payload happens to begin like one of
+            // our messages is not. It still says the server is there.
+            if !matches!(message, tokio_tungstenite::tungstenite::Message::Binary(_)) {
+                continue;
+            }
             let value = message.into_data();
             let data = match get_data_schema(&value) {
                 Ok(data) => data,
@@ -336,22 +357,33 @@ pub async fn handle_websocket(
                 }
             };
 
+            // Counted before anything is told about the connection, so that
+            // what is read after `Connected` already includes this pong.
+            let is_pong = data.category == Category::Pong as u16;
+            if is_pong {
+                traffic.pong_received();
+            }
             if is_first {
                 is_first = false;
                 server_sender.send_status(SenderStatus::Connected).await;
             }
             let id = id.clone();
             log_debug!("Client receive message: {:?}", data);
-            if data.category == Category::Pong as u16 {
+            if is_pong {
                 if !is_wait_ping.is_true() {
                     is_wait_ping.set_bool(true);
                     let server_sender_clone = server_sender.clone();
                     let is_wait_ping_clone = is_wait_ping.clone();
-                    // Schedule the next ping after receiving a pong
+                    // Schedule the next ping after receiving a pong. On this
+                    // connection only: if it has been replaced by then, the
+                    // new one has pings of its own, and its first frame must
+                    // be its own.
                     tokio::spawn(async move {
                         sleep(Duration::from_secs(retry_seconds)).await;
                         is_wait_ping_clone.set_bool(false);
-                        server_sender_clone.send(make_ping_message(&id)).await;
+                        server_sender_clone
+                            .send_to(make_ping_message(&id), connection)
+                            .await;
                     });
                 }
                 continue;
@@ -488,7 +520,8 @@ pub async fn handle_websocket(
     log_debug!("Connected to {} for web socket", server_ip);
 
     let (sx, mut rx) = mpsc::channel(options.per_connection_buffer_size);
-    let stop = register_connection(&server_sender, sx.clone(), &server_ip).await;
+    let (stop, _connection) =
+        register_connection(&server_sender, sx.clone(), &server_ip, Default::default()).await;
 
     // Without bebop there is no pong handshake, so emit Connected immediately
     // and set the initial received timestamp for the loop checker.

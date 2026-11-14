@@ -4,12 +4,15 @@
 //! including message sending, connection status tracking, and automatic reconnection.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "bebop")]
 use bebop::Record;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -154,6 +157,25 @@ pub struct ServerSender {
     /// so the checker also needs to know how young the connection it is
     /// judging is.
     pub connected_at: i64,
+    /// The number of the connection registered by the last
+    /// [`add`](Self::add): 1 for the first, one more for each after it,
+    /// never reused while the process runs. 0 before the first.
+    ///
+    /// `connected_at` is in whole seconds, so two connections made in one
+    /// second share it; this number they do not.
+    /// [`ServerSenderTrait::send_to`] takes it, so that a message meant for
+    /// one connection never goes out on the one that replaced it. Read it
+    /// with [`connection`](Self::connection); only `add` moves it.
+    connection: u64,
+    /// Pings queued on the current connection and pongs that came back on
+    /// it. See [`delivery_mark`](Self::delivery_mark).
+    traffic: Arc<ConnectionTraffic>,
+    /// When the server was last heard from and when the current connection
+    /// was registered, on a clock that does not move when the wall clock is
+    /// set. Read through [`heard_ago`](Self::heard_ago) and
+    /// [`registered_ago`](Self::registered_ago).
+    heard_instant: Option<Instant>,
+    registered_instant: Option<Instant>,
     /// How many dials have failed in a row on a client that keeps its address
     /// (`use_keep_ip`). Back to zero with every connection that is made.
     ///
@@ -216,6 +238,10 @@ impl ServerSender {
             server_ip,
             server_received_times: 0,
             connected_at: 0,
+            connection: 0,
+            traffic: Arc::default(),
+            heard_instant: None,
+            registered_instant: None,
             failed_dials: 0,
             status_tx,
             status_rx: Some(status_rx),
@@ -294,12 +320,102 @@ impl ServerSender {
     /// * `sx` - New message sender channel
     /// * `server_ip` - Server IP address or WebSocket URL
     pub fn add(&mut self, sx: mpsc::Sender<Message>, server_ip: &str) {
+        self.add_with_traffic(sx, server_ip, Arc::default());
+    }
+
+    /// [`add`](Self::add), for a connection whose traffic was counted from
+    /// before it was registered (its first ping).
+    pub(crate) fn add_with_traffic(
+        &mut self,
+        sx: mpsc::Sender<Message>,
+        server_ip: &str,
+        traffic: Arc<ConnectionTraffic>,
+    ) {
         self.sx_drop();
         self.sx = Some(sx);
         self.stop = Some(CancellationToken::new());
         self.server_ip = server_ip.into();
         self.connected_at = now().timestamp();
+        self.connection += 1;
+        self.traffic = traffic;
+        self.registered_instant = Some(Instant::now());
         self.failed_dials = 0;
+    }
+
+    /// The number of the registered connection (see the field).
+    pub fn connection(&self) -> u64 {
+        self.connection
+    }
+
+    /// Read right after [`ServerSenderTrait::send_to`] took a message on
+    /// `connection`: how many pings had been queued on it by then. `None`
+    /// when `connection` is no longer the registered one (the mark would be
+    /// another connection's). Pass it to [`delivered`](Self::delivered).
+    pub fn delivery_mark(&self, connection: u64) -> Option<u64> {
+        self.is_live(connection)
+            .then(|| self.traffic.pings.load(Ordering::SeqCst))
+    }
+
+    /// Whether `connection` is the registered one and has not been dropped.
+    fn is_live(&self, connection: u64) -> bool {
+        self.connection == connection && self.sx.is_some()
+    }
+
+    /// Whether the server has read a message that connection `connection`
+    /// took when [`delivery_mark`](Self::delivery_mark) read `mark`.
+    ///
+    /// A connection is one ordered stream, and the server answers every ping
+    /// with one pong, in order, on that connection (0.9.9 servers; an older
+    /// server sends the pong to whichever connection has the client's id,
+    /// so after a reconnect it can land on the new one). Every ping queued
+    /// before the message was counted in `mark` before it was queued; so
+    /// once more than `mark` pongs have come back, one of them answers a ping
+    /// queued after the message, and the server read that ping after the
+    /// message.
+    ///
+    /// `false` once the connection has been dropped or another registered:
+    /// what it had not confirmed may never have arrived. Never `true` for a
+    /// client that does not ping (`use_ping` off, or a build without
+    /// `bebop`), or against a server that does not answer pings.
+    pub fn delivered(&self, connection: u64, mark: u64) -> bool {
+        self.is_live(connection) && self.traffic.pongs.load(Ordering::SeqCst) > mark
+    }
+
+    /// Records that the server was heard from just now.
+    pub fn mark_heard(&mut self) {
+        self.server_received_times = now().timestamp();
+        self.heard_instant = Some(Instant::now());
+    }
+
+    /// How long since the server was last heard from, on any connection;
+    /// `None` if it never has been (`server_received_times` is 0).
+    ///
+    /// The wall-clock stamp alone goes wrong when the clock is set back: a
+    /// stamp from before reads as "just now" until the clock catches up, and
+    /// a dead link passes for a live one all that time. So the longer of two
+    /// readings counts: the monotonic one when the wall clock went back, the
+    /// wall-clock one when the stamp itself was moved back (a caller standing
+    /// for an hour of silence).
+    pub fn heard_ago(&self) -> Option<Duration> {
+        if self.server_received_times <= 0 {
+            return None;
+        }
+        Some(longer(wall_clock_ago(self.server_received_times), self.heard_instant))
+    }
+
+    /// How long ago the current connection was registered; `None` before the
+    /// first. Read like [`heard_ago`](Self::heard_ago).
+    pub fn registered_ago(&self) -> Option<Duration> {
+        if self.connected_at <= 0 {
+            return None;
+        }
+        // A stamp in the clock's future with nothing to check it against
+        // was set by hand; believed, it would read as "just made" until the
+        // clock caught up, so it is not believed.
+        if self.registered_instant.is_none() && self.connected_at > now().timestamp() {
+            return None;
+        }
+        Some(longer(wall_clock_ago(self.connected_at), self.registered_instant))
     }
 
     /// Ends the current connection and keeps the server address.
@@ -435,6 +551,23 @@ pub trait ServerSenderTrait {
     /// Sends a message to the connected server.
     async fn send(&self, message: Message);
 
+    /// Sends a message on one connection only: the one numbered
+    /// `connection` (see [`ServerSender::connection`]). Returns whether that
+    /// connection's queue took it, which [`send`](Self::send) does not say.
+    ///
+    /// `false` when that connection is not the one registered when this is
+    /// called (it was dropped, or another replaced it), and when its queue
+    /// would not take the message. `true` means the message is in that
+    /// connection's queue, behind everything queued before it, the
+    /// connection's first ping included; not that the server has read it,
+    /// and not that the connection was still the registered one by then: a
+    /// send that waits for room in a full queue can find the connection
+    /// replaced when it gets in. It never reaches any other connection.
+    ///
+    /// New in 0.9.9 as a required method: an implementation of this trait
+    /// outside the crate, if there is one, has to add it.
+    async fn send_to(&self, message: Message, connection: u64) -> bool;
+
     /// Registers a reference to self for recursive operations.
     async fn regist(&mut self, server_sender: RwServerSender);
 
@@ -454,21 +587,68 @@ pub trait ServerSenderTrait {
     async fn is_need_connect(&self) -> bool;
 }
 
+/// Pings queued on one connection and pongs that came back on it.
+#[derive(Debug, Default)]
+pub(crate) struct ConnectionTraffic {
+    pings: AtomicU64,
+    pongs: AtomicU64,
+}
+
+impl ConnectionTraffic {
+    /// Counted before the ping is queued, never after: a ping counted late
+    /// could be ahead of a message whose mark did not include it, and its
+    /// pong would then vouch for a message the server had not read.
+    pub(crate) fn ping_queued(&self) {
+        self.pings.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn pong_received(&self) {
+        self.pongs.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a message is a ping: its category, the first two bytes.
+#[cfg(feature = "bebop")]
+fn is_ping(message: &Message) -> bool {
+    let data: &[u8] = match message {
+        Message::Binary(bytes) => bytes,
+        _ => return false,
+    };
+    data.len() >= 2
+        && u16::from_le_bytes([data[0], data[1]]) == crate::schema::Category::Ping as u16
+}
+
+#[cfg(not(feature = "bebop"))]
+fn is_ping(_message: &Message) -> bool {
+    false
+}
+
+/// Time since a wall-clock stamp, in seconds; nothing for one in the future.
+fn wall_clock_ago(stamp: i64) -> Duration {
+    Duration::from_secs((now().timestamp() - stamp).max(0) as u64)
+}
+
+/// The longer of a wall-clock reading and a monotonic one, when there is one.
+fn longer(wall_clock: Duration, since: Option<Instant>) -> Duration {
+    since.map_or(wall_clock, |at| wall_clock.max(at.elapsed()))
+}
+
 /// Registers a connection — what [`ServerSenderTrait::add`] does — and
-/// returns the signal that ends it.
+/// returns the signal that ends it and the connection's number.
 ///
-/// Sender, signal and address are set under one lock, so the signal handed
-/// back is the one that belongs to this sender.
+/// Sender, signal, number and address are set under one lock, so what is
+/// handed back belongs to this sender.
 pub(crate) async fn register_connection(
     server_sender: &RwServerSender,
     sx: mpsc::Sender<Message>,
     server_ip: &str,
-) -> CancellationToken {
+    traffic: Arc<ConnectionTraffic>,
+) -> (CancellationToken, u64) {
     // Update in-memory state
-    let (connection_store, stop) = {
+    let (connection_store, stop, connection) = {
         let mut guard = server_sender.write().await;
-        guard.add(sx, server_ip);
-        (guard.connection_store.clone(), guard.stop_signal())
+        guard.add_with_traffic(sx, server_ip, traffic);
+        (guard.connection_store.clone(), guard.stop_signal(), guard.connection)
     };
 
     log_debug!("set start server_ip: {:?}", server_ip);
@@ -489,7 +669,7 @@ pub(crate) async fn register_connection(
     // stores "" rather than "//10.0.0.5" all over again.
     let port = parse_port(server_ip);
     connection_store.set_server_connect_info(server_ip, port).await;
-    stop
+    (stop, connection)
 }
 
 /// Implementation of ServerSenderTrait for thread-safe server sender.
@@ -500,7 +680,7 @@ pub(crate) async fn register_connection(
 impl ServerSenderTrait for RwServerSender {
     /// Sets a new message sender and server IP, also updating the database.
     async fn add(&self, sx: mpsc::Sender<Message>, server_ip: &str) {
-        register_connection(self, sx, server_ip).await;
+        let _ = register_connection(self, sx, server_ip, Arc::default()).await;
     }
 
     /// Gets the receiver for connection status updates.
@@ -544,16 +724,81 @@ impl ServerSenderTrait for RwServerSender {
     }
 
     /// Sends a message to the connected server.
-    ///
-    /// Extracts needed data under a brief read lock, then retries with
-    /// exponential backoff outside the lock to avoid blocking other operations.
     async fn send(&self, message: Message) {
-        // Phase 1: Brief read lock to clone needed data
+        let _ = send_message(self, message, None).await;
+    }
+
+    async fn send_to(&self, message: Message, connection: u64) -> bool {
+        send_message(self, message, Some(connection)).await
+    }
+
+    /// Registers a reference to self for recursive operations.
+    async fn regist(&mut self, server_sender: RwServerSender) {
+        self.write().await.regist(server_sender);
+    }
+
+    /// Checks if the current server IP is valid and recently active.
+    async fn is_valid_server_ip(&self) -> bool {
+        let guard = self.read().await;
+        let window = Duration::from_secs(guard.options.retry_seconds.max(1) * 2);
+        !guard.server_ip.is_empty() && guard.heard_ago().is_some_and(|ago| ago < window)
+    }
+
+    /// Removes the current server IP and drops the connection.
+    async fn remove_ip(&self) {
+        self.write().await.remove_ip();
+    }
+
+    /// Removes the server IP and clears persisted connection info.
+    ///
+    /// Delegates to the `ConnectionStore`, which handles both the bebop
+    /// (clear `server_ip`, keep `port`) and non-bebop (remove entirely)
+    /// storage encodings.
+    async fn remove_ip_if_valid_server_ip(&self, server_ip: &str) {
+        let connection_store = self.read().await.connection_store.clone();
+        self.remove_ip().await;
+        connection_store.clear_server_ip(server_ip).await;
+    }
+
+    /// Updates the timestamp of the last received message.
+    async fn write_received_times(&self) {
+        self.write().await.mark_heard();
+    }
+
+    /// Checks if a new connection attempt is needed.
+    ///
+    /// Returns true when no connection task is currently running (`is_try_connect == false`).
+    /// The `is_try_connect` flag is set to true when `handle_websocket` begins and
+    /// reset to false when it exits, providing reliable duplicate-connection prevention
+    /// regardless of whether the server IP has changed.
+    async fn is_need_connect(&self) -> bool {
+        !self.read().await.is_try_connect
+    }
+}
+
+/// What [`ServerSenderTrait::send`] and [`ServerSenderTrait::send_to`] do:
+/// sends on the connection that is registered, or with `only` set, on that
+/// connection and no other. Returns whether a connection's queue took the
+/// message.
+///
+/// Extracts needed data under a brief read lock, then retries with
+/// exponential backoff outside the lock to avoid blocking other operations.
+async fn send_message(this: &RwServerSender, message: Message, only: Option<u64>) -> bool {
+    {
+        // Phase 1: Brief read lock to clone needed data. The connection is
+        // checked under the same lock its sender is taken under, so a
+        // connection registered in between cannot be the one used.
         let (sender, status_tx, options, server_sender_ref, connection_store, server_ip, metrics) = {
-            let guard = self.read().await;
+            let guard = this.read().await;
+            if only.is_some_and(|connection| connection != guard.connection) {
+                return false;
+            }
             let Some(sx) = guard.sx.as_ref() else {
-                return;
+                return false;
             };
+            if is_ping(&message) {
+                guard.traffic.ping_queued();
+            }
             (
                 sx.clone(),
                 guard.status_tx.clone(),
@@ -584,7 +829,7 @@ impl ServerSenderTrait for RwServerSender {
             match sender.send(message.clone()).await {
                 Ok(_) => {
                     metrics.inc_messages_sent();
-                    return;
+                    return true;
                 }
                 Err(e) => {
                     log_error!(
@@ -599,14 +844,14 @@ impl ServerSenderTrait for RwServerSender {
                         // connection's end has been dealt with by whoever
                         // ended it; reporting it again would put
                         // `Disconnected` after the replacement's `Connected`.
-                        let still_registered = self
+                        let still_registered = this
                             .read()
                             .await
                             .sx
                             .as_ref()
                             .is_some_and(|current| current.same_channel(&sender));
                         if !still_registered {
-                            return;
+                            return false;
                         }
                         // Retries exhausted: notify disconnection + spawn reconnection
                         let _ = status_tx.try_send(SenderStatus::Disconnected);
@@ -629,61 +874,11 @@ impl ServerSenderTrait for RwServerSender {
                                 }
                             }
                         }
-                        return;
+                        return false;
                     }
                 }
             }
         }
-    }
-
-    /// Registers a reference to self for recursive operations.
-    async fn regist(&mut self, server_sender: RwServerSender) {
-        self.write().await.regist(server_sender);
-    }
-
-    /// Checks if the current server IP is valid and recently active.
-    async fn is_valid_server_ip(&self) -> bool {
-        let clone = self.read().await;
-        let result = !clone.server_ip.is_empty()
-            && clone.server_received_times
-                + (match clone.options.retry_seconds {
-                    0 => 1,
-                    _ => clone.options.retry_seconds as i64,
-                } * 2)
-                > now().timestamp();
-        drop(clone);
-        result
-    }
-
-    /// Removes the current server IP and drops the connection.
-    async fn remove_ip(&self) {
-        self.write().await.remove_ip();
-    }
-
-    /// Removes the server IP and clears persisted connection info.
-    ///
-    /// Delegates to the `ConnectionStore`, which handles both the bebop
-    /// (clear `server_ip`, keep `port`) and non-bebop (remove entirely)
-    /// storage encodings.
-    async fn remove_ip_if_valid_server_ip(&self, server_ip: &str) {
-        let connection_store = self.read().await.connection_store.clone();
-        self.remove_ip().await;
-        connection_store.clear_server_ip(server_ip).await;
-    }
-
-    /// Updates the timestamp of the last received message.
-    async fn write_received_times(&self) {
-        self.write().await.server_received_times = now().timestamp();
-    }
-
-    /// Checks if a new connection attempt is needed.
-    ///
-    /// Returns true when no connection task is currently running (`is_try_connect == false`).
-    /// The `is_try_connect` flag is set to true when `handle_websocket` begins and
-    /// reset to false when it exits, providing reliable duplicate-connection prevention
-    /// regardless of whether the server IP has changed.
-    async fn is_need_connect(&self) -> bool {
-        !self.read().await.is_try_connect
     }
 }
 

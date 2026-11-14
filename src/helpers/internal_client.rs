@@ -21,7 +21,6 @@ use crate::helpers::{
     connection_store::ConnectionStore,
     get_internal_websocket::wrap_get_internal_websocket,
     server_sender::{to_ws_url, SenderStatus, ServerSenderTrait},
-    traits::date_time::now,
 };
 use crate::{helpers::metrics::Metrics, log_debug, log_error, AtomicWebsocketType};
 
@@ -451,10 +450,9 @@ async fn internal_ping_loop_cheker(
         let (silence, connection_store) = {
             let mut guard = server_sender.write().await;
             let silence = judge_silence(
-                guard.server_received_times,
-                guard.connected_at,
-                retry_seconds as i64,
-                now().timestamp(),
+                guard.heard_ago(),
+                guard.registered_ago(),
+                Duration::from_secs(retry_seconds),
             );
             if silence == Silence::Dead {
                 if !use_keep_ip {
@@ -534,32 +532,39 @@ enum Silence {
     Dead,
 }
 
-/// Judges a connection's silence at `now`.
+/// Judges a connection's silence.
 ///
-/// `last_received` is the last message from the server on *any* connection;
-/// `connected_at` is when the current one was registered. The silence is
-/// counted from the later of the two. Without that, a connection made a
-/// moment ago would be judged by the previous one's last message — dead on
-/// arrival, and taken down before its first pong.
+/// `heard_ago` is how long since the last message from the server on *any*
+/// connection; `registered_ago` how long since the current one was
+/// registered. The silence is counted from the more recent of the two.
+/// Without that, a connection made a moment ago would be judged by the
+/// previous one's last message — dead on arrival, and taken down before its
+/// first pong.
 ///
 /// A client that has never heard from a server has no connection to call
 /// dead, however long it has been.
 ///
-/// A `connected_at` later than `now` is not believed. It means the clock was
-/// set back after the connection was registered, and unlike the receive
-/// stamp nothing ever refreshes it: taken at its word it would keep a dead
-/// connection "just made" until the clock caught up with it.
-fn judge_silence(last_received: i64, connected_at: i64, retry_seconds: i64, now: i64) -> Silence {
-    if last_received <= 0 {
+/// Both come from [`ServerSender::heard_ago`] and
+/// [`ServerSender::registered_ago`], which read a clock that setting the
+/// wall clock does not move: a clock set back no longer makes a stamp from
+/// before look fresh until it catches up.
+///
+/// [`ServerSender::heard_ago`]: crate::server_sender::ServerSender::heard_ago
+/// [`ServerSender::registered_ago`]: crate::server_sender::ServerSender::registered_ago
+fn judge_silence(
+    heard_ago: Option<Duration>,
+    registered_ago: Option<Duration>,
+    retry: Duration,
+) -> Silence {
+    let Some(heard_ago) = heard_ago else {
         return Silence::Alive;
-    }
-    let connected_at = if connected_at > now { 0 } else { connected_at };
-    let quiet_since = last_received.max(connected_at);
-    if quiet_since + retry_seconds * 4 < now {
+    };
+    let quiet_for = registered_ago.map_or(heard_ago, |registered| registered.min(heard_ago));
+    if quiet_for > retry * 4 {
         Silence::Dead
-    } else if quiet_since + retry_seconds * 2 < now {
+    } else if quiet_for > retry * 2 {
         Silence::Quiet
-    } else if connected_at > last_received {
+    } else if registered_ago.is_some_and(|registered| registered < heard_ago) {
         Silence::Unproven
     } else {
         Silence::Alive
@@ -636,10 +641,9 @@ async fn outer_ping_loop_cheker(
         let (silence, connection_store) = {
             let mut guard = server_sender.write().await;
             let silence = judge_silence(
-                guard.server_received_times,
-                guard.connected_at,
-                retry_seconds as i64,
-                now().timestamp(),
+                guard.heard_ago(),
+                guard.registered_ago(),
+                Duration::from_secs(retry_seconds),
             );
             if silence == Silence::Dead {
                 if !use_keep_ip {
@@ -997,7 +1001,7 @@ async fn discover_beside_dials(
         }
         guard.is_scanning = true;
         guard.failed_dials = 0;
-        guard.connected_at
+        guard.connection()
     };
 
     // The scan stops as soon as a connection is made by other means: the
@@ -1020,7 +1024,7 @@ async fn discover_beside_dials(
     let found = {
         let mut guard = server_sender.write().await;
         guard.is_scanning = false;
-        if guard.connected_at != connected_before {
+        if guard.connection() != connected_before {
             // Connected meanwhile; whatever the scan found is not needed.
             return;
         }
@@ -1067,13 +1071,14 @@ async fn discover_beside_dials(
     }
 }
 
-/// Resolves once a connection has been registered that was not there at
-/// `connected_before`.
+/// Resolves once a connection has been registered that was not there when
+/// the connection number was `connected_before`. By number, not by time: two
+/// connections made in one second share a timestamp.
 #[cfg(all(feature = "native-db", feature = "bebop"))]
-async fn connection_made_since(server_sender: &RwServerSender, connected_before: i64) {
+async fn connection_made_since(server_sender: &RwServerSender, connected_before: u64) {
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if server_sender.read().await.connected_at != connected_before {
+        if server_sender.read().await.connection() != connected_before {
             return;
         }
     }
@@ -1253,21 +1258,45 @@ mod tests {
         assert_eq!(options.connect_timeout_seconds, 1);
     }
 
-    const RETRY: i64 = 5;
-    const NOW: i64 = 1_700_000_000;
+    const RETRY: Duration = Duration::from_secs(5);
+
+    /// A store that stores nothing: these tests only need a sender.
+    struct NoStore;
+
+    #[async_trait::async_trait]
+    impl ConnectionStore for NoStore {
+        async fn ensure_client_id(&self) {}
+        async fn get_client_id(&self) -> String {
+            String::new()
+        }
+        async fn get_server_connect_info(&self) -> Option<(String, String)> {
+            None
+        }
+        async fn set_server_connect_info(&self, _server_ip: &str, _port: &str) {}
+        async fn clear_server_ip(&self, _server_ip: &str) {}
+    }
+
+    fn sender() -> crate::server_sender::ServerSender {
+        crate::server_sender::ServerSender::new(Arc::new(NoStore), String::new(), ClientOptions::default())
+    }
+
+    fn secs(n: u64) -> Option<Duration> {
+        Some(Duration::from_secs(n))
+    }
 
     #[test]
     fn a_client_that_never_connected_is_not_called_dead() {
-        assert_eq!(judge_silence(0, 0, RETRY, NOW), Silence::Alive);
+        assert_eq!(judge_silence(None, None, RETRY), Silence::Alive);
+        assert_eq!(judge_silence(None, secs(3600), RETRY), Silence::Alive);
     }
 
     #[test]
     fn silence_is_pinged_after_two_periods_and_dead_after_four() {
         // Exactly on the mark still counts as the gentler of the two.
-        assert_eq!(judge_silence(NOW - 2 * RETRY, 0, RETRY, NOW), Silence::Alive);
-        assert_eq!(judge_silence(NOW - 2 * RETRY - 1, 0, RETRY, NOW), Silence::Quiet);
-        assert_eq!(judge_silence(NOW - 4 * RETRY, 0, RETRY, NOW), Silence::Quiet);
-        assert_eq!(judge_silence(NOW - 4 * RETRY - 1, 0, RETRY, NOW), Silence::Dead);
+        assert_eq!(judge_silence(secs(10), None, RETRY), Silence::Alive);
+        assert_eq!(judge_silence(secs(11), None, RETRY), Silence::Quiet);
+        assert_eq!(judge_silence(secs(20), None, RETRY), Silence::Quiet);
+        assert_eq!(judge_silence(secs(21), None, RETRY), Silence::Dead);
     }
 
     /// The reconnect after an hour of silence: the new connection is up and
@@ -1275,12 +1304,8 @@ mod tests {
     /// old connection's, an hour ago.
     #[test]
     fn a_connection_just_made_is_not_judged_by_the_one_before_it() {
-        let an_hour_ago = NOW - 3600;
-        assert_eq!(judge_silence(an_hour_ago, NOW, RETRY, NOW), Silence::Unproven);
-        assert_eq!(
-            judge_silence(an_hour_ago, NOW - 2 * RETRY, RETRY, NOW),
-            Silence::Unproven
-        );
+        assert_eq!(judge_silence(secs(3600), secs(0), RETRY), Silence::Unproven);
+        assert_eq!(judge_silence(secs(3600), secs(10), RETRY), Silence::Unproven);
     }
 
     /// Not dead — but not "alive" either, which is what resets the backoff
@@ -1288,28 +1313,46 @@ mod tests {
     /// none must still be dialed less and less often.
     #[test]
     fn a_connection_not_heard_from_yet_does_not_count_as_alive() {
-        let an_hour_ago = NOW - 3600;
-        assert_ne!(judge_silence(an_hour_ago, NOW - 1, RETRY, NOW), Silence::Alive);
+        assert_ne!(judge_silence(secs(3600), secs(1), RETRY), Silence::Alive);
         // Heard from since it was made: alive.
-        assert_eq!(judge_silence(NOW, NOW - 1, RETRY, NOW), Silence::Alive);
-        assert_eq!(judge_silence(NOW - 1, NOW - 1, RETRY, NOW), Silence::Alive);
+        assert_eq!(judge_silence(secs(0), secs(1), RETRY), Silence::Alive);
+        assert_eq!(judge_silence(secs(1), secs(1), RETRY), Silence::Alive);
     }
 
-    /// The clock was set back after the connection was made. Its stamp is in
-    /// the future and nothing refreshes it; believed, it would call the
-    /// connection young until the clock caught up.
-    #[test]
-    fn a_connection_stamped_in_the_future_is_judged_by_its_messages() {
-        let tomorrow = NOW + 86_400;
+    /// The clock was set back after the server was last heard from. By the
+    /// wall clock the last message is in the future, which used to read as
+    /// "just now" until the clock caught up: a dead link stayed "alive" for
+    /// as long as the clock had been set back. The sender's readings take
+    /// the monotonic clock then, and the silence is what it really is.
+    #[tokio::test(start_paused = true)]
+    async fn a_clock_set_back_does_not_make_an_old_message_look_new() {
+        let mut sender = sender();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        sender.add(tx, "ws://192.168.1.100:9000");
+        sender.mark_heard();
+
+        tokio::time::advance(RETRY * 4 + Duration::from_secs(1)).await;
+        // The wall clock went back a day: both stamps are now in its future.
+        sender.server_received_times += 86_400;
+        sender.connected_at += 86_400;
+
         assert_eq!(
-            judge_silence(NOW - 4 * RETRY - 1, tomorrow, RETRY, NOW),
+            judge_silence(sender.heard_ago(), sender.registered_ago(), RETRY),
             Silence::Dead
         );
-        assert_eq!(
-            judge_silence(NOW - 2 * RETRY - 1, tomorrow, RETRY, NOW),
-            Silence::Quiet
-        );
-        assert_eq!(judge_silence(NOW - 1, tomorrow, RETRY, NOW), Silence::Alive);
+    }
+
+    /// The other way round: a stamp moved back by hand (how the tests stand
+    /// for an hour of silence) counts even though the monotonic clock says
+    /// the message was a moment ago.
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_moved_back_counts_as_that_much_silence() {
+        let mut sender = sender();
+        sender.mark_heard();
+        sender.server_received_times -= 3700;
+
+        assert!(sender.heard_ago().unwrap() >= Duration::from_secs(3700));
+        assert_eq!(judge_silence(sender.heard_ago(), None, RETRY), Silence::Dead);
     }
 
     /// Silence means something only to a client that pings and is answered.
@@ -1331,29 +1374,16 @@ mod tests {
     /// It gets the same patience as any other, and no more.
     #[test]
     fn a_new_connection_that_never_answers_is_dead_in_its_turn() {
-        let an_hour_ago = NOW - 3600;
-        assert_eq!(
-            judge_silence(an_hour_ago, NOW - 2 * RETRY - 1, RETRY, NOW),
-            Silence::Quiet
-        );
-        assert_eq!(
-            judge_silence(an_hour_ago, NOW - 4 * RETRY - 1, RETRY, NOW),
-            Silence::Dead
-        );
+        assert_eq!(judge_silence(secs(3600), secs(11), RETRY), Silence::Quiet);
+        assert_eq!(judge_silence(secs(3600), secs(21), RETRY), Silence::Dead);
     }
 
     /// A message since the connection was made is what counts once there is
     /// one.
     #[test]
     fn the_later_of_the_two_stamps_is_the_one_that_counts() {
-        assert_eq!(
-            judge_silence(NOW - 1, NOW - 3600, RETRY, NOW),
-            Silence::Alive
-        );
-        assert_eq!(
-            judge_silence(NOW - 4 * RETRY - 1, NOW - 3600, RETRY, NOW),
-            Silence::Dead
-        );
+        assert_eq!(judge_silence(secs(1), secs(3600), RETRY), Silence::Alive);
+        assert_eq!(judge_silence(secs(21), secs(3600), RETRY), Silence::Dead);
     }
 
     #[cfg(all(feature = "native-db", feature = "bebop"))]
@@ -1412,5 +1442,46 @@ mod tests {
             }
         }
         // If ip is empty, it means no network connectivity - that's OK for testing
+    }
+
+    /// The scan stops once a connection has been made by other means. Two
+    /// connections made in the same second used to look like none at all.
+    #[cfg(all(feature = "native-db", feature = "bebop"))]
+    #[tokio::test]
+    async fn a_scan_sees_a_connection_made_in_the_same_second() {
+        let server_sender: RwServerSender =
+            Arc::new(tokio::sync::RwLock::new(sender()));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        server_sender.write().await.add(tx.clone(), "ws://192.168.1.100:9000");
+        let before = server_sender.read().await.connection();
+        let stamp_before = server_sender.read().await.connected_at;
+
+        {
+            // The same second, as far as the stamp can tell (set by hand: the
+            // two calls can fall either side of a second boundary).
+            let mut guard = server_sender.write().await;
+            guard.add(tx, "ws://192.168.1.100:9000");
+            guard.connected_at = stamp_before;
+        }
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            connection_made_since(&server_sender, before),
+        )
+        .await
+        .expect("seen by its number");
+    }
+
+    /// A stamp set by hand in the clock's future, with nothing to check it
+    /// against, is not taken to mean "just made".
+    #[test]
+    fn a_hand_set_future_connection_stamp_is_not_believed() {
+        let mut sender = sender();
+        sender.server_received_times = 1;
+        sender.connected_at = i64::MAX / 2;
+        assert_eq!(sender.registered_ago(), None);
+        assert_eq!(
+            judge_silence(sender.heard_ago(), sender.registered_ago(), RETRY),
+            Silence::Dead
+        );
     }
 }

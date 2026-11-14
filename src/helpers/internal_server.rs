@@ -524,6 +524,12 @@ where
     tokio::spawn(async move {
         let use_ping = options.use_ping;
         let middlewares = options.middlewares;
+        // Pongs go back on this connection, not to whichever connection has
+        // the peer's id by then: after a reconnect the old connection's last
+        // pings can still be read here, and their pongs would land on the
+        // new one, where a client that counts its pongs (to know what the
+        // server has read) would count answers to pings it never sent there.
+        let own = sx.clone();
         let id = get_id_from_first_message(&mut istream, client_senders.clone(), sx.clone()).await;
 
         if let Some(id) = id {
@@ -549,11 +555,12 @@ where
                     };
 
                     // Handle ping messages
-                    if data.category == Category::Ping as u16 && use_ping {
-                        if let Ok(data) = Ping::deserialize(&data.datas) {
-                            client_senders.send(data.peer, make_pong_message()).await;
-                            continue;
-                        }
+                    if data.category == Category::Ping as u16
+                        && use_ping
+                        && Ping::deserialize(&data.datas).is_ok()
+                    {
+                        answer_ping(&client_senders, &id, &own).await;
+                        continue;
                     }
 
                     // Handle disconnect messages
@@ -724,6 +731,46 @@ where
     Ok(())
 }
 
+/// Answers a ping on the connection it came in on (see `inner_handle_ws`).
+///
+/// Otherwise what `ClientSendersTrait::send` did with the pong when it went
+/// through the client table, and only while `peer` is registered with this
+/// connection:
+/// * a client that is not (it was let go, or another connection has its id)
+///   gets no pong, as before: it hears nothing, and dials again, which is
+///   the only way back into the table;
+/// * on success the client counts as heard from (one that only pings would
+///   otherwise be let go after `client_timeout_seconds`), on failure it is
+///   let go, and either way the metrics count it.
+///
+/// `peer` is the id the connection's first frame gave. A later ping naming
+/// another client answers and refreshes this connection, not that client's
+/// (before 0.9.9 the pong went to the client the ping named).
+#[cfg(feature = "bebop")]
+async fn answer_ping(
+    client_senders: &RwClientSenders,
+    peer: &str,
+    own: &Sender<tokio_tungstenite::tungstenite::Message>,
+) {
+    if !client_senders.holds(peer, own) {
+        return;
+    }
+    match own
+        .send_timeout(make_pong_message(), super::client_sender::SEND_TIMEOUT)
+        .await
+    {
+        Ok(()) => {
+            client_senders.metrics.inc_messages_sent();
+            client_senders.touch_if_held(peer, own);
+        }
+        Err(e) => {
+            client_senders.metrics.inc_send_errors();
+            log_error!("Dropping peer {:?}: {:?}", peer, e);
+            client_senders.remove_if_held(peer, own);
+        }
+    }
+}
+
 /// Extracts client ID from the first message and sets up the connection.
 ///
 /// WebSocket clients are expected to send a Ping message as their first
@@ -767,11 +814,12 @@ where
             if let Ok(ping) = Ping::deserialize(&data.datas) {
                 let peer_id: String = ping.peer.into();
                 _id = Some(peer_id.clone());
+                let own = sx.clone();
                 client_senders.add(&peer_id, sx).await;
 
                 // Either respond with a pong or proxy the ping
                 if options.use_ping {
-                    client_senders.send(&peer_id, make_pong_message()).await;
+                    answer_ping(&client_senders, &peer_id, &own).await;
                 } else {
                     // Optionally change the category when proxying
                     if options.proxy_ping > 0 {
